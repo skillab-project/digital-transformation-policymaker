@@ -1,15 +1,20 @@
+
 from typing import List, Dict, Tuple
 import pandas as pd
 import numpy as np
+import hashlib
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from .config import settings
 
-# -------- Model (single load) --------
-MODEL = SentenceTransformer("all-mpnet-base-v2")
+# -------- Configuration --------
+MODEL_NAME = "all-MiniLM-L6-v2"
+MODEL = SentenceTransformer(MODEL_NAME)
+CACHE_DIR = Path("storage/esco_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 def _embed(texts: List[str], normalize: bool = True):
-    vecs = MODEL.encode(texts, convert_to_tensor=False, normalize_embeddings=normalize)
+    vecs = MODEL.encode(texts, convert_to_numpy=True, normalize_embeddings=normalize, show_progress_bar=False, batch_size=128)
     return np.asarray(vecs, dtype=np.float32)
 
 # -------- CSV loaders --------
@@ -19,33 +24,48 @@ def _load_df(csv_path: str) -> pd.DataFrame:
     for col in ("label", "alternative_labels", "description"):
         if col not in df.columns:
             df[col] = ""
-    df["alternative_labels"] = df["alternative_labels"].fillna("")
-    df["description"] = df["description"].fillna("")
-    return df
+    return df.fillna({"alternative_labels": "", "description": ""})
 
 def _to_texts(df: pd.DataFrame) -> List[str]:
-    return [
-        f"{row['label']}. {row.get('alternative_labels','')}. {row.get('description','')}"
-        for _, row in df.iterrows()
-    ]
+    return (df["label"].fillna("") + ". " + df["alternative_labels"].fillna("") + ". " + df["description"].fillna("")).tolist()
+
+# -------- Disk persistence --------
+def _cache_key(csv_path: str) -> str:
+    p = Path(csv_path).resolve()
+    meta = f"{MODEL_NAME}|{p}|{p.stat().st_mtime}"
+    return hashlib.sha256(meta.encode("utf-8")).hexdigest()
+
+def _load_or_build_embeddings(csv_path: str) -> Tuple[pd.DataFrame, np.ndarray]:
+    key = _cache_key(csv_path)
+    df_file = CACHE_DIR / f"{key}.df.parquet"
+    emb_file = CACHE_DIR / f"{key}.embeddings.npy"
+
+    if df_file.exists() and emb_file.exists():
+        df = pd.read_parquet(df_file)
+        embs = np.load(emb_file, mmap_mode="r")
+        return df, embs
+
+    df = _load_df(csv_path)
+    texts = _to_texts(df)
+    embs = _embed(texts, normalize=True)
+
+    df.to_parquet(df_file, index=False)
+    np.save(emb_file, embs)
+    embs = np.load(emb_file, mmap_mode="r")  # reload as memory-mapped
+    return df, embs
 
 # -------- In-memory caches --------
-_cached = {
-    "occ_df": None, "occ_embs": None,
-    "sk_df": None,  "sk_embs": None
-}
+_cached = {"occ_df": None, "occ_embs": None, "sk_df": None,  "sk_embs": None}
 
 def _ensure_occ_cache():
     if _cached["occ_df"] is None or _cached["occ_embs"] is None:
-        df = _load_df(settings.esco_occupations_csv)
-        embs = _embed(_to_texts(df), normalize=True)
+        df, embs = _load_or_build_embeddings(settings.esco_occupations_csv)
         _cached["occ_df"], _cached["occ_embs"] = df, embs
     return _cached["occ_df"], _cached["occ_embs"]
 
 def _ensure_skills_cache():
     if _cached["sk_df"] is None or _cached["sk_embs"] is None:
-        df = _load_df(settings.esco_skills_csv)
-        embs = _embed(_to_texts(df), normalize=True)
+        df, embs = _load_or_build_embeddings(settings.esco_skills_csv)
         _cached["sk_df"], _cached["sk_embs"] = df, embs
     return _cached["sk_df"], _cached["sk_embs"]
 
@@ -100,3 +120,11 @@ def map_technologies_to_esco_both(technologies: List[Dict], top_n: int = 5, thre
         "occupations": map_technologies_to_esco_occupations(technologies, top_n, threshold),
         "skills":      map_technologies_to_esco_skills(technologies, top_n, threshold),
     }
+
+# -------- Warm-up on startup --------
+def warm_esco_caches():
+    """
+    Build/load both ESCO embeddings at startup so first request is instant.
+    """
+    _ensure_occ_cache()
+    _ensure_skills_cache()

@@ -1,17 +1,28 @@
 
-import os, json, tempfile, pathlib
+import pathlib, hashlib
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 from typing import Optional
-from .models import AnalyzeRequest, JobStatus, ESCOMapRequest
+from .models import JobStatus, ESCOMapRequest
 from .analyzer import process_pdf, save_json, load_json
-from .jobs import new_job, set_status, get_job
-from .esco_match import map_technologies_to_esco_occupations, map_technologies_to_esco_skills, map_technologies_to_esco_both
+from .jobs import new_job, set_status, get_job, list_jobs, rehydrate_from_storage, _load_jobs
+from .esco_match import map_technologies_to_esco_occupations, map_technologies_to_esco_skills, map_technologies_to_esco_both, warm_esco_caches
 
 app = FastAPI(title="Future Tech Trends Analyzer", version="1.0.0")
 
 STORAGE = pathlib.Path("storage")
 STORAGE.mkdir(exist_ok=True)
+
+def _sha256(data: bytes) -> str:
+    h = hashlib.sha256()
+    h.update(data)
+    return h.hexdigest()
+
+@app.on_event("startup")
+def _startup():
+    _load_jobs()
+    rehydrate_from_storage("storage")
+    warm_esco_caches()
 
 @app.get("/health")
 def health():
@@ -21,21 +32,30 @@ def health():
 async def analyze_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...), query: Optional[str] = None):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    file_hash = _sha256(data)
+
+    for jid, info in (list_jobs() or {}).items():
+        if info.get("status") == "done" and info.get("file_hash") == file_hash and info.get("result_path"):
+            return JobStatus(job_id=jid, status="done", message="Duplicate PDF detected. Reusing previous result.", result_path=info["result_path"])
+
     job_id = new_job()
-    # save file
     tmp_path = STORAGE / f"{job_id}.pdf"
     with open(tmp_path, "wb") as f:
-        f.write(await file.read())
+        f.write(data)
 
     def run():
         try:
-            set_status(job_id, "running", message="Processing PDF")
+            set_status(job_id, "running", message="Processing PDF", file_hash=file_hash)
             result = process_pdf(str(tmp_path), query=query)
             out_path = STORAGE / f"{job_id}.analysis.json"
             save_json(result, str(out_path))
-            set_status(job_id, "done", result_path=str(out_path))
+            set_status(job_id, "done", result_path=str(out_path), file_hash=file_hash)
         except Exception as e:
-            set_status(job_id, "error", message=str(e))
+            set_status(job_id, "error", message=str(e), file_hash=file_hash)
 
     background_tasks.add_task(run)
     return JobStatus(job_id=job_id, status="queued")
