@@ -1,26 +1,30 @@
 
 # Future Technology Trends Identifier
 
-A microservice for analyzing **Future Technology Trends** from unstructured sources (e.g., PDFs of EU policy documents, Horizon Europe work programs) and mapping them to **ESCO Occupations** and **ESCO Skills**. The service is part of the SKILLAB platform.
+A microservice for analyzing **Future Technology Trends** from unstructured sources (e.g., PDFs of EU policy documents, Horizon Europe work programs) and mapping them to **ESCO Occupations** and **ESCO Skills**. The service also identifies **emerging technologies** (not well represented in ESCO) and generates **policy recommendations** for them. It is part of the **SKILLAB** platform.
 
 ---
 
 ## 🚀 Features
 
 - **PDF Ingestion & Chunking**  
-  Upload PDFs; text is chunked with overlap to preserve context.  
+  User upload PDF documents; text is chunked with overlap to preserve context. Duplicate PDFs (same content hash) are automatically detected and re-use previous analysis results.
 - **LLM-based Technology Extraction**  
-  Each chunk is processed through an LLM (e.g., Mistral via Ollama/OpenWebUI). Output is structured JSON listing technologies, domains, occupations, and confidence scores.  
+  Each chunk is processed through a local or remote LLM (e.g., Mistral via Ollama/OpenWebUI). Output is structured JSON listing technologies, domains, occupations, and confidence scores.  
 - **Job-based Processing**  
   Long analyses run asynchronously. Each request returns a `job_id`, which can be polled until the analysis is complete.  
-- **JSON Storage (no zlib)**  
-  Results are stored as `.json` files (human-readable).  
+- **JSON Storage**  
+  Results are stored as a human-readable `.analysis.json` file in `/storage`.  
 - **Mapping to ESCO Occupations & Skills**  
-  Extracted technologies can be mapped to both **occupations** (`all_occupations.csv`) and **skills** (`all_skills.csv`), with cosine similarity search over pre-computed embeddings.  
-- **Configurable Targets**  
-  Mapping supports three modes: `occupations`, `skills`, or `both`.  
+  Extracted technologies are semantically mapped to **ESCO occupations** and **skills**, with cosine similarity search over pre-computed **SentenceTransformer** embeddings.
 - **Caching & Warm-up**  
   ESCO embeddings are cached in memory and preloaded at startup for faster responses.  
+- **Configurable Mapping Targets**  
+  Mapping supports three modes: `occupations`, `skills`, or `both`.  
+- **Emerging Technology Detection**  
+  A technology is flagged emerging if it has no ESCO matches above the threshold (configurable per request), or either its skill or occupation match list is empty.  
+- **Policy Recommendation Pipeline**  
+  Identified emerging technologies are sent individually to an LLM to generate structured, machine-readable **policy recommendations** (training, curricula, funding, standards, incentives, KPIs, etc.).
 
 ---
 
@@ -32,6 +36,7 @@ app/
  ├── analyzer.py          # PDF processing & JSON save/load
  ├── llm_client.py        # Calls to LLM for extraction
  ├── esco_match.py        # Mapping to occupations and skills
+ ├── policy_recs.py       # Emerging-tech detection + policy generation
  ├── models.py            # Pydantic models
  ├── config.py            # Settings (reads .env)
  └── jobs.py              # Job tracking utils
@@ -39,7 +44,9 @@ datasets/
  ├── all_occupations.csv  # ESCO occupations dataset
  └── all_skills.csv       # ESCO skills dataset
 storage/
- └── *.analysis.json      # Results of PDF analysis
+ ├── *.analysis.json      # PDF analysis results
+ ├── *.policy.json        # Policy recommendation results
+ └── esco_cache/          # Cached ESCO embeddings (.parquet + .npy)
 ```
 
 ---
@@ -48,7 +55,7 @@ storage/
 
 ```bash
 git clone <repo>
-cd tech-trends-service
+cd future-technology-trends-identifier
 pip install -r requirements.txt
 ```
 
@@ -71,35 +78,48 @@ ESCO_SKILLS_CSV=datasets/all_skills.csv
 uvicorn app.main:app --reload
 ```
 
+**Startup behavior**
+
+- Rehydrates previous job metadata
+- Pre-loads cached ESCO embeddings
+- Ready for immediate requests
+
 ---
 
 ## 📡 API Endpoints
 
 ### 1. Analyze PDF
 `POST /analyze/pdf`  
-Upload a PDF and start asynchronous analysis.  
-Returns a `job_id`.
+Upload a PDF and start asynchronous analysis.
+
+**Response:**
+```json
+{
+  "job_id": "abc123",
+  "status": "queued"
+}
+```
 
 ### 2. Get Job Status
 `GET /jobs/{job_id}`  
-Check the status of the analysis (`queued`, `running`, `done`).  
+Check the status of the analysis (`queued`, `running`, `done`, or `error`).  
 When finished, the result is stored as `.json`.
 
 ### 3. Map to ESCO
 `POST /map-to-esco`  
-Map extracted technologies to ESCO entities.
+Map extracted technologies to ESCO occupations and/or skills.
 
-**Request body:**
+**Request:**
 ```json
 {
-  "job_id": "YOUR_JOB_ID",
+  "job_id": {job_id},
   "top_n": 5,
   "threshold": 0.5,
   "target": "both"  // "occupations", "skills", or "both"
 }
 ```
 
-**Response (example):**
+**Response:**
 ```json
 {
   "occupations": [
@@ -111,13 +131,36 @@ Map extracted technologies to ESCO entities.
 }
 ```
 
+### 4. Policy Recommendations
+`POST /policy/recommendations`
+Generates policy recommendations for emerging technologies (detected automatically).
+
+```json
+{
+  "job_id": {job_id},
+  "target": "both",
+  "similarity_threshold": 0.5
+}
+```
+
+**Response:**
+```json
+{
+  "job_id": "abc123",
+  "result_path": "storage/abc123.policy.json",
+  "emerging_count": 3,
+  "has_recommendations": true
+}
+```
+
 ---
 
-## 🧪 Testing with Postman
+## 🧪 Example Workflow
 
-1. **Upload PDF** → `POST /analyze/pdf` with `file` in form-data.  
-2. **Check job status** → `GET /jobs/{job_id}` until `"status": "done"`.  
-3. **Run mapping** → `POST /map-to-esco` with `job_id` and `target`.  
+1. **Upload a Horizon Europe PDF** → `/analyze/pdf`
+2. **Check job status** → `/jobs/{job_id}`
+3. **Map extracted technologies** → `/map-to-esco`
+4. **Generate policy recommendations** → `/policy/recommendations`
 
 ---
 

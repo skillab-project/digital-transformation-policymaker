@@ -1,12 +1,14 @@
 
 import pathlib, hashlib
+import uuid
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from typing import Optional
-from .models import JobStatus, ESCOMapRequest
+from .models import JobStatus, ESCOMapRequest, PolicyReq
 from .analyzer import process_pdf, save_json, load_json
 from .jobs import new_job, set_status, get_job, list_jobs, rehydrate_from_storage, _load_jobs
 from .esco_match import map_technologies_to_esco_occupations, map_technologies_to_esco_skills, map_technologies_to_esco_both, warm_esco_caches
+from .policy_recs import generate_policy_recommendations
 
 app = FastAPI(title="Future Tech Trends Analyzer", version="1.0.0")
 
@@ -93,3 +95,34 @@ def map_to_esco(req: ESCOMapRequest):
         return map_technologies_to_esco_skills(techs, top_n=req.top_n, threshold=req.threshold)
     else:  # both
         return map_technologies_to_esco_both(techs, top_n=req.top_n, threshold=req.threshold)
+
+@app.post("/policy/recommendations")
+def policy_recommendations(req: PolicyReq):
+    techs = req.technologies or []
+    if not techs and req.job_id:
+        info = get_job(req.job_id)
+        if not info or info.get("status") != "done":
+            raise HTTPException(status_code=404, detail="Job not found or not done")
+        data = load_json(info.get("result_path"))
+        techs = data.get("technologies", [])
+    if not techs:
+        raise HTTPException(status_code=400, detail="No technologies provided.")
+
+    out = generate_policy_recommendations(
+        technologies=techs,
+        target=req.target,
+        similarity_threshold=req.similarity_threshold,
+        max_actions_per_tech=req.max_actions_per_tech,
+        llm_model=req.llm_model,
+    )
+
+    out_job_id = req.job_id or str(uuid.uuid4())
+    out_path = STORAGE / f"{out_job_id}.policy.json"
+    save_json(out, str(out_path))
+
+    return {
+        "job_id": out_job_id,
+        "result_path": str(out_path),
+        "emerging_count": len(out.get("emerging", [])),
+        "has_recommendations": len(out.get("recommendations", {}).get("recommendations", [])) > 0
+    }

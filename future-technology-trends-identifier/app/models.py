@@ -1,6 +1,15 @@
 
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict
 from pydantic import BaseModel
+
+
+class PolicyReq(BaseModel):
+    job_id: Optional[str] = None
+    technologies: Optional[List[Dict]] = None
+    target: str = "both"   # "skills" | "occupations" | "both"
+    similarity_threshold: float = 0.5
+    max_actions_per_tech: int = 4
+    llm_model: Optional[str] = None
 
 class Technology(BaseModel):
     name: str
