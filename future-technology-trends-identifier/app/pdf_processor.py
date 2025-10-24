@@ -1,9 +1,31 @@
+# -*- coding: utf-8 -*-
+"""
+PDF analysis pipeline for Future Tech Trends.
+
+Steps:
+1) Extract + clean text from PDF
+2) Detect sections and chunk (or fallback to naive chunking)
+3) Analyze chunks concurrently via LLM
+4) Merge per-chunk extractions into a single result
+
+Return value is the merged dict that `merge_results()` produces
+(typically: {"technologies": [...]}).
+
+Created on Thu Oct 23 13:33:15 2025
+
+@author: tsoukj
+"""
+
+from __future__ import annotations
 
 import re
 from typing import Tuple, Dict, List
 import PyPDF2
 from .config import settings
 
+# -----------------------------------------------------------------------------
+# Section heading patterns
+# -----------------------------------------------------------------------------
 GENERIC_PATTERNS = [
     r'^\s*(\d+\.\d+(?:\.\d+)*)\s+([A-Z][^\n]{10,80})(?=\n|$)',
     r'^\s*[A-Z]{3,}-\d+[-A-Z]*\s+([^\n]{10,80})(?=\n|$)',
@@ -29,7 +51,14 @@ EU_SPECIAL_PATTERNS = [
 
 SECTION_PATTERNS = EU_SPECIAL_PATTERNS + GENERIC_PATTERNS
 
+# -----------------------------------------------------------------------------
+# Extraction
+# -----------------------------------------------------------------------------
 def extract_text(pdf_path: str) -> Tuple[str, Dict[int, str]]:
+    """
+    Extract text with newlines preserved. Each page ends with '\n'.
+    Respects MAX_PAGES using 1-based page_num (no off-by-one).
+    """
     text = ""
     page_map = {}
     with open(pdf_path, 'rb') as file:
@@ -59,12 +88,25 @@ def _should_skip_page(page_num: int, total_pages: int) -> bool:
         adjusted.append(n if n >= 0 else total_pages + n + 1)
     return page_num in adjusted
 
+# -----------------------------------------------------------------------------
+# Cleaning
+# -----------------------------------------------------------------------------
 def clean_text(text: str) -> str:
+    """
+    Normalize while preserving newlines so line-by-line detection works.
+    """
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'[^\x20-\x7E]', ' ', text)
     return text.strip()
 
+# -----------------------------------------------------------------------------
+# Section detection
+# -----------------------------------------------------------------------------
 def detect_sections(text: str) -> List[tuple]:
+    """
+    Scan lines sequentially; when a pattern matches, capture the title and
+    compute the absolute start index in the full text.
+    """
     sections = []
     for line in text.split('\n'):
         for pattern in SECTION_PATTERNS:
@@ -84,7 +126,13 @@ def detect_sections(text: str) -> List[tuple]:
         if len(t) > 5 and not any(w in t.lower() for w in ['footer','header','page'])
     ]
 
+# -----------------------------------------------------------------------------
+# Chunking 
+# -----------------------------------------------------------------------------
 def chunk_text(text: str, sections: List[tuple]) -> List[dict]:
+    """
+    Create chunks from section spans
+    """
     chunks = []
     for start, end, title in sections:
         if any(ex in title.lower() for ex in settings.exclude_sections.split(',')):
@@ -98,6 +146,9 @@ def chunk_text(text: str, sections: List[tuple]) -> List[dict]:
     return sorted(chunks, key=lambda x: -x['priority'])
 
 def _subchunk_section(text: str, section_title: str) -> List[dict]:
+    """
+    Chunk a single section by window with overlap, preferring '\n\n' cut points.
+    """
     chunks = []
     start = 0
     end = settings.chunk_size
