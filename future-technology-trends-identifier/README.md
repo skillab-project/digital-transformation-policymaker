@@ -41,7 +41,7 @@ app/
  ├── models.py            # Pydantic models
  ├── config.py            # Settings (reads .env)
  └── jobs.py              # Job tracking utils
-datasets/
+esco_data/
  ├── all_occupations.csv  # ESCO occupations dataset
  └── all_skills.csv       # ESCO skills dataset
 storage/
@@ -67,8 +67,8 @@ API_URL=http://localhost:3000
 API_TOKEN=your_token_here
 MODEL_NAME=mistral
 PARALLEL_CHUNKS=4
-ESCO_OCCUPATIONS_CSV=datasets/all_occupations.csv
-ESCO_SKILLS_CSV=datasets/all_skills.csv
+ESCO_OCCUPATIONS_CSV=esco_data/all_occupations.csv
+ESCO_SKILLS_CSV=esco_data/all_skills.csv
 ```
 
 ---
@@ -83,7 +83,7 @@ docker build -t skillab-future-tech:latest .
 **Run container**
 ```bash
 docker run --rm -p 8000:8000 \
-  -v "$(pwd)/datasets:/app/datasets" \
+  -v "$(pwd)/esco_data:/app/esco_data" \
   -v "$(pwd)/storage:/app/storage" \
   -e API_TOKEN="your_token_here" \
   -e API_URL="http://160.40.52.27:3000" \

@@ -58,8 +58,8 @@ class Settings(BaseSettings):
     embed_model: str = Field("all-MiniLM-L6-v2", env="EMBED_MODEL")
     embed_batch_size: int = Field(128, ge=1, le=1024, env="EMBED_BATCH_SIZE")
     esco_cache_dir: str = Field("storage/esco_cache", env="ESCO_CACHE_DIR")
-    esco_occupations_csv: str = Field("datasets/all_occupations.csv", env="ESCO_OCCUPATIONS_CSV")
-    esco_skills_csv: str = Field("datasets/all_skills.csv", env="ESCO_SKILLS_CSV")
+    esco_occupations_csv: str = Field("esco_data/all_occupations.csv", env="ESCO_OCCUPATIONS_CSV")
+    esco_skills_csv: str = Field("esco_data/all_skills.csv", env="ESCO_SKILLS_CSV")
 
     # DBSCAN clustering (cluster_merge.py)
     dbscan_eps: float = Field(0.30, ge=0.01, le=1.0, env="DBSCAN_EPS")
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     cluster_min_size: int = Field(2, ge=1, le=100, env="CLUSTER_MIN_SIZE")
 
     # ================ Files / Storage ==================
-    datasets_folder: str = Field("datasets", env="DATASETS_FOLDER")
+    esco_data_folder: str = Field("esco_data", env="ESCO_DATA_FOLDER")
     storage_dir: str = Field("storage", env="STORAGE_DIR")
 
     # ---------------- Validators & Post-processing ----------------
@@ -82,15 +82,15 @@ class Settings(BaseSettings):
         # Normalize directories to absolute paths and ensure they exist
         storage = Path(self.storage_dir).resolve()
         esco_cache = Path(self.esco_cache_dir).resolve()
-        datasets = Path(self.datasets_folder).resolve()
+        esco_data = Path(self.esco_data_folder).resolve()
 
         storage.mkdir(parents=True, exist_ok=True)
         esco_cache.mkdir(parents=True, exist_ok=True)
-        datasets.mkdir(parents=True, exist_ok=True)
+        esco_data.mkdir(parents=True, exist_ok=True)
 
         object.__setattr__(self, "storage_dir", str(storage))
         object.__setattr__(self, "esco_cache_dir", str(esco_cache))
-        object.__setattr__(self, "datasets_folder", str(datasets))
+        object.__setattr__(self, "esco_data_folder", str(esco_data))
 
         return self
 

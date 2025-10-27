@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 COPY . .
 
 # Make sure runtime folders exist (your code also creates them on startup)
-RUN mkdir -p storage datasets
+RUN mkdir -p storage esco_data
 
 # Expose FastAPI default port
 EXPOSE 8000
