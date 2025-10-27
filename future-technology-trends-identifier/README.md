@@ -198,6 +198,7 @@ Add `?include_content=true` to return full recommendations inline:
     "mapping_evidence": {...}
   }
 }
+```
 
 ---
 
