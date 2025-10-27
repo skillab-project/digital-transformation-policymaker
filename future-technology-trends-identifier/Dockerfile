@@ -18,6 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Workdir
 WORKDIR /app
 
+# Add Portainer team label
+LABEL io.portainer.accesscontrol.teams="skillab-all"
+
 # Install base Python deps
 COPY requirements.txt .
 RUN pip install --upgrade pip \
@@ -27,14 +30,14 @@ RUN pip install --upgrade pip \
 # Keep it separate so you don't fight with PyPI default wheels.
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
 
-# Copy your app
+# Copy project files
 COPY . .
 
-# Make sure runtime folders exist (your code also creates them on startup)
+# Make sure runtime folders exist
 RUN mkdir -p storage esco_data
 
 # Expose FastAPI default port
-EXPOSE 8000
+EXPOSE 8876
 
 # Start the API (adjust module path if different)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8876"]

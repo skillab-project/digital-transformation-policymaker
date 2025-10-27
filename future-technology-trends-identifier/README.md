@@ -77,17 +77,12 @@ ESCO_SKILLS_CSV=esco_data/all_skills.csv
 
 **Build image**
 ```bash
-docker build -t skillab-future-tech:latest .
+docker build -t future-technology-trends-identifier .
 ```
 
 **Run container**
 ```bash
-docker run --rm -p 8000:8000 \
-  -v "$(pwd)/esco_data:/app/esco_data" \
-  -v "$(pwd)/storage:/app/storage" \
-  -e API_TOKEN="your_token_here" \
-  -e API_URL="http://160.40.52.27:3000" \
-  skillab-future-tech:latest
+docker run -p 8000:8000 future-technology-trends-identifier
 ```
 
 ---
