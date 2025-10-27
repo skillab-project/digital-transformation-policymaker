@@ -9,25 +9,15 @@ Created on Thu Oct 23 13:33:15 2025
 
 from __future__ import annotations
 
-from typing import List, Optional, Literal, Dict, Union
-from pydantic import BaseModel, Field
+from typing import List, Optional, Literal, Dict, Union, Any
+from pydantic import BaseModel, Field, ConfigDict
 
 # ---------------------------------------------------------------------
 # Core domain
 # ---------------------------------------------------------------------
 class Technology(BaseModel):
     """Minimal technology object produced by the analyzer."""
-    name: str = Field(..., description="Canonical technology name")
-    description: str = Field("", description="Short description or context")
-    domain: str = Field("", description="High-level domain/category")
-    occupations: Optional[List[str]] = Field(
-        default=None, description="Related occupations (if any)"
-    )
-    confidence: Optional[float] = Field(
-        default=None, ge=0.0, le=1.0, description="Extractor confidence in [0,1]"
-    )
-
-    class Config:
+    model_config = ConfigDict(
         json_schema_extra = {
             "example": {
                 "name": "Edge AI in Industrial IoT",
@@ -37,6 +27,17 @@ class Technology(BaseModel):
                 "confidence": 0.82,
             }
         }
+    )
+
+    name: str = Field(..., description="Canonical technology name")
+    description: str = Field("", description="Short description or context")
+    domain: str = Field("", description="High-level domain/category")
+    occupations: Optional[List[str]] = Field(
+        default=None, description="Related occupations (if any)"
+    )
+    confidence: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0, description="Extractor confidence in [0,1]"
+    )
 
 class AnalysisResult(BaseModel):
     """Structured output of PDF analysis."""
@@ -148,17 +149,22 @@ class PolicyReq(BaseModel):
 
 class PolicyRecommendationsResponse(BaseModel):
     """Response envelope for /policy/recommendations endpoint."""
-    job_id: str
-    result_path: str
-    emerging_count: int
-    has_recommendations: bool
-
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
             "example": {
                 "job_id": "8b0a53e2-2b0f-4c2c-9f5c-8d8e3d9d2d0a",
                 "result_path": "storage/8b0a53e2-2b0f-4c2c-9f5c-8d8e3d9d2d0a.policy.json",
                 "emerging_count": 3,
                 "has_recommendations": True,
             }
-        }
+        },
+    )
+
+    job_id: str
+    result_path: str
+    emerging_count: int
+    has_recommendations: bool
+
+class PolicyRecommendationsResponseWithContent(PolicyRecommendationsResponse):
+    content: Union["PolicyGeneratorOutput", Dict[str, Any]]

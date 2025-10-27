@@ -26,12 +26,12 @@ import logging
 from pathlib import Path
 import uuid
 from typing import Any, Optional, Union
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, Query
 from fastapi.responses import FileResponse
 from .analyzer import load_json, process_pdf, save_json
 from .esco_match import map_technologies_to_esco_occupations, map_technologies_to_esco_skills, map_technologies_to_esco_both, warm_esco_caches
 from .jobs import new_job, set_status, get_job, list_jobs, rehydrate_from_storage, _load_jobs
-from .models import ESCOMapRequest, ESCOMapItem, ESCOMapBoth, JobStatus, PolicyReq, PolicyRecommendationsResponse, PolicyGeneratorOutput
+from .models import ESCOMapRequest, ESCOMapItem, ESCOMapBoth, JobStatus, PolicyReq, PolicyRecommendationsResponse, PolicyGeneratorOutput, PolicyRecommendationsResponseWithContent
 from .policy_recs import generate_policy_recommendations
 
 # -----------------------------------------------------------------------------
@@ -220,8 +220,8 @@ def map_to_esco(req: ESCOMapRequest) -> Union[list[ESCOMapItem], ESCOMapBoth]:
 # -----------------------------------------------------------------------------
 # Policy recommendations
 # -----------------------------------------------------------------------------
-@app.post("/policy/recommendations", tags=["policy"], response_model=PolicyRecommendationsResponse)
-def policy_recommendations(req: PolicyReq) -> PolicyRecommendationsResponse:
+@app.post("/policy/recommendations", tags=["policy"], response_model=Union[PolicyRecommendationsResponseWithContent, PolicyRecommendationsResponse])
+def policy_recommendations(req: PolicyReq, include_content: bool = Query(False, description="Include the generated JSON payload inline")):
     """
     Generate policy recommendations for *emerging* technologies.
 
@@ -263,11 +263,21 @@ def policy_recommendations(req: PolicyReq) -> PolicyRecommendationsResponse:
     out_path = STORAGE / f"{out_job_id}.policy.json"
     save_json(out, str(out_path))
 
-    has_recs = bool(out.get("recommendations") or [])
+    recs = out.get("recommendations")
+    if isinstance(recs, dict):
+        rec_count = len(recs.get("recommendations", []))
+    elif isinstance(recs, list):
+        rec_count = len(recs)
+    else:
+        rec_count = 0
 
-    return {
+    resp = {
         "job_id": out_job_id,
         "result_path": str(out_path),
         "emerging_count": len(out.get("emerging", [])),
-        "has_recommendations": has_recs,
+        "has_recommendations": rec_count > 0,
     }
+    if include_content:
+        resp = {**resp, "content": out}
+
+    return resp

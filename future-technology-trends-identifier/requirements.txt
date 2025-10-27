@@ -12,3 +12,5 @@ pandas==2.2.2
 numpy==1.26.2
 pydantic-settings==2.6.1
 python-multipart==0.0.20
+pyarrow==11.0.0
+torch==2.3.1
