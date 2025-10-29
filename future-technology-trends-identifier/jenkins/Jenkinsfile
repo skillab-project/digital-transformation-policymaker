@@ -74,7 +74,7 @@ pipeline {
         stage("Run_Unit_Tests"){
             steps {
                 echo "***** Running Unit Tests *****"
-				sh "docker run --rm --env-file .env -e PYTHONPATH=/app ${APP_NAME}:test pytest"
+				sh "docker run --rm --env-file .env -e PYTHONPATH=/app ${APP_NAME}:test pytest -q"
             }
         }
 
@@ -114,7 +114,7 @@ pipeline {
                     sh 'docker pull ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
 					sh 'docker stop ${APP_NAME} || true'
 					sh 'docker rm ${APP_NAME} || true'
-                    sh 'docker run -d --env-file .env --name ${APP_NAME} -p 8875:8875 ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
+                    sh 'docker run -d --env-file .env --name ${APP_NAME} -p 8876:8876 ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
                     sh 'docker ps'
                 }
             }
