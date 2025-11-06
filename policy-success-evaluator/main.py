@@ -36,7 +36,7 @@ load_dotenv()
 class Settings(BaseModel):
     api_url: str = os.getenv("API_URL", "<REPLACE_ME>")
     api_token: str = os.getenv("API_TOKEN", "<REPLACE_ME>")
-    model_name: str = os.getenv("MODEL_NAME", "mistral:latest")
+    model: str = os.getenv("MODEL_NAME", "mistral:latest")
     temperature: float = float(os.getenv("TEMPERATURE", "0.1"))
     seed: int = int(os.getenv("SEED", "42"))
     timeout: int = int(os.getenv("TIMEOUT", "60"))
@@ -193,105 +193,19 @@ def _chat_json(payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
             time.sleep(0.75 * (attempt + 1))
     raise RuntimeError("Unreachable")
 
-def _split_prereqs(x: Any) -> List[str]:
-    if isinstance(x, list):
-        return [p.strip() for p in x if str(p).strip()]
-    if isinstance(x, str):
-        parts = [p.strip() for p in re.split(r"[;,]", x) if p.strip()]
-        return parts or ["Define prerequisites"]
-    return ["Define prerequisites"]
-
-def _norm_tte(val: str, allowed: List[str]) -> str:
-    v = (val or "").strip().title()
-    # fix variants like "Short to Medium"
-    if "Short" in v and "Medium" in v:
-        return "Medium" if "Medium" in allowed else allowed[0]
-    return v if v in allowed else allowed[0]
-
-def _enforce_on_track_policy(on_track: Optional[bool], recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if on_track is not True:
-        return recs
-
-    allowed_levers = {"Monitoring", "Consolidation", "Advisory Support", "Evaluation", "Data Collection"}
-    allowed_impacts = {"Low", "Medium"}
-    allowed_tte = ["Short", "Medium"]
-
-    replacements = [
-        # (keyword, new_title, mech_suffix)
-        ("training", "Lightweight Skills Monitoring & Nudges",
-         "Monitor participation and outcomes of existing training; send targeted nudges to sustain uptake without new subsidies."),
-        ("collaborate", "Provider Performance Monitoring & Light Brokerage",
-         "Track provider delivery quality; publish light scorecards; broker matches only where bottlenecks appear."),
-        ("policy", "Regulatory Impact Monitoring",
-         "Assess unintended burdens/benefits quarterly; adjust guidance if early warnings trigger."),
-    ]
-
-    fixed: List[Dict[str, Any]] = []
-    for r in recs:
-        item = dict(r)
-
-        # Enforce lever type
-        if item.get("lever_type") not in allowed_levers:
-            item["lever_type"] = "Monitoring"
-
-        # Rewrite titles/mechanisms toward consolidation if they look like accelerators
-        title = (item.get("title") or "").strip()
-        mech  = (item.get("mechanism") or "").strip()
-
-        low = (title + " " + mech).lower()
-        adjusted = False
-        for key, new_title, tail in replacements:
-            if key in low:
-                item["title"] = new_title
-                item["mechanism"] = f"Establish light-touch tracking with early-warning thresholds. {tail}"
-                adjusted = True
-                break
-        if not adjusted:
-            # Generic consolidation phrasing if nothing matched
-            if item.get("lever_type") == "Monitoring":
-                item["title"] = title or "Lightweight Monitoring & Early-Warning"
-                item["mechanism"] = mech or "Quarterly checks with threshold-based alerts; minimal reporting load."
-
-        # Clamp impact
-        imp = (item.get("expected_impact") or "").title()
-        item["expected_impact"] = imp if imp in allowed_impacts else "Medium"
-
-        # Clamp time_to_effect
-        item["time_to_effect"] = _norm_tte(item.get("time_to_effect", ""), allowed_tte)
-
-        # Normalize prerequisites
-        item["prerequisites"] = _split_prereqs(item.get("prerequisites"))
-
-        # Ensure rational exists
-        if not item.get("rational"):
-            item["rational"] = "KPI is on track; consolidation minimizes cost while preserving trajectory and detecting regressions early."
-
-        fixed.append(item)
-
-    if not fixed:
-        fixed = [{
-            "lever_type": "Monitoring",
-            "title": "Lightweight Monitoring & Early-Warning",
-            "mechanism": "Implement quarterly checks with threshold alerts and minimal reporting load.",
-            "rational": "KPI is on track; focus on maintaining trajectory and quick response to deviations.",
-            "expected_impact": "Medium",
-            "time_to_effect": "Short",
-            "risks_tradeoffs": "Risk of complacency; keep alert thresholds meaningful.",
-            "prerequisites": ["Define thresholds", "Assign monitoring owner"]
-        }]
-    return fixed
-
 def call_llm_for_recommendations(kpi: KPI, scope: Scope, trend_summary: Optional[str], on_track: Optional[bool] = None) -> Dict[str, Any]:
     gap = (kpi.target_value - kpi.current_value) if kpi.direction == "higher_is_better" else (kpi.current_value - kpi.target_value)
 
     # === conditional lever sets based on track status ===
+    lever_enum_on_track = ["Monitoring", "Consolidation", "Advisory Support", "Evaluation", "Data Collection"]
+    lever_enum_off_track = ["Grants", "Tax Incentives", "Training", "Regulation", "Public Procurement", "Partnerships", "Advisory Support"]
     if on_track is True:
-        lever_enum = ["Monitoring", "Consolidation", "Advisory Support", "Evaluation", "Data Collection"]
+        lever_enum = lever_enum_on_track
         impact_enum = ["Low", "Medium"]
         tte_enum = ["Short", "Medium"]                      # <-- restrict time_to_effect when on-track
         mode_line = "Status: ON_TRACK — focus on consolidation/monitoring; avoid cost-intensive levers (no Grants/Tax Incentives)."
     else:
-        lever_enum = ["Grants", "Tax Incentives", "Training", "Regulation", "Public Procurement", "Partnerships", "Advisory Support"]
+        lever_enum = lever_enum_off_track
         impact_enum = ["Low", "Medium", "High"]
         tte_enum = ["Short", "Medium", "Long"]              # <-- full range when not on-track
         mode_line = "Status: NOT_ON_TRACK — prioritize accelerators; cost-effective but impactful levers."
@@ -332,17 +246,17 @@ def call_llm_for_recommendations(kpi: KPI, scope: Scope, trend_summary: Optional
         "1. Assess the KPI trajectory:\n"
         "   - Is the KPI improving, stagnating, or declining?\n"
         "   - Is the current trend sufficient to reach the target by the deadline?\n"
-        "2. Propose 3–5 interventions.\n"
+        f'2. Propose 5-{len(lever_enum_off_track)} interventions from the categories: {lever_enum_off_track}.\n'
         "3. For each recommendation, include exactly these fields:\n"
         "   - lever_type\n"
         "   - title\n"
-        "   - mechanism\n"
+        "   - mechanism (a brief 2–3 sentence description of the mechanism)\n"
         "   - rational (a brief 1–2 sentence justification linking the mechanism to closing this KPI gap)\n"
         "   - expected_impact (Low | Medium | High)\n"
         "   - time_to_effect (Short | Medium | Long)\n"
         "   - risks_tradeoffs\n"
         "   - prerequisites (array of 1–3 short items)\n"
-        "4. If status is ON_TRACK, DO NOT use cost-intensive levers like Grants or Tax Incentives; focus on consolidation/monitoring.\n\n"
+        f'4. If status is ON_TRACK, DO NOT use cost-intensive levers like Grants or Tax Incentives; focus on categories: {lever_enum_on_track}.\n\n'
         "Output JSON format (return ONLY valid JSON, no prose, no markdown):\n\n"
         "{\n"
         f'  "kpi_id": "{kpi.id}",\n'
@@ -363,7 +277,7 @@ def call_llm_for_recommendations(kpi: KPI, scope: Scope, trend_summary: Optional
     )
 
     payload = {
-        "model": settings.model_name,
+        "model": settings.model,
         "messages": [
             {
                 "role": "user",
@@ -384,7 +298,7 @@ def call_llm_for_recommendations(kpi: KPI, scope: Scope, trend_summary: Optional
                 "trend_analysis": {"type": "string"},
                 "recommendations": {
                     "type": "array",
-                    "minItems": 1,
+                    "minItems": len(lever_enum),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -445,13 +359,10 @@ def kpi_recommendations(req: RecsRequest):
             raise HTTPException(status_code=502, detail=f"LLM call failed for KPI '{kpi.id}': {e}")
 
         try:
-            recs = raw.get("recommendations", [])
-            recs = _enforce_on_track_policy(on_track, recs)
-            
             payload = {
                 "kpi_id": raw.get("kpi_id", kpi.id),
                 "trend_analysis": trend_summary,
-                "recommendations": recs,
+                "recommendations": raw.get("recommendations", []),
             }
             results.append(RecsResponse(**payload))
         except ValidationError as ve:
@@ -464,4 +375,4 @@ def kpi_recommendations(req: RecsRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": settings.model_name}
+    return {"status": "ok", "model": settings.model}
