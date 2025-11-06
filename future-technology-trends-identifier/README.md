@@ -65,7 +65,7 @@ Create `.env` file:
 ```env
 API_URL=http://localhost:3000
 API_TOKEN=your_token_here
-MODEL_NAME=mistral
+MODEL_NAME=mistral:latest
 PARALLEL_CHUNKS=4
 ESCO_OCCUPATIONS_CSV=esco_data/all_occupations.csv
 ESCO_SKILLS_CSV=esco_data/all_skills.csv
