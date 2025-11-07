@@ -1,6 +1,8 @@
+
 fastapi==0.112.2
 uvicorn[standard]==0.32.1
 pydantic==2.8.2
 requests==2.32.3
 python-dotenv==0.21.0
+pytest==7.4.0
 httpx==0.28.1
