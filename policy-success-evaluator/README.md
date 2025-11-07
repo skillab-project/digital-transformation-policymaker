@@ -24,12 +24,12 @@ A microservice for evaluating the **success of policies and KPIs** within the SK
  ## 📂 Project Structure
 
 ```
-policy-success-evaluator/
- ├── main.py                 # FastAPI entrypoint and main logic
- ├── .env                    # Environment configuration (LLM endpoint, model, etc.)
- ├── requirements.txt        # Python dependencies
- ├── Dockerfile              # Container build file
- └── README.md               # Documentation
+├── app/
+│   └── main.py             # FastAPI entrypoint and main logic
+├── .env                    # Environment configuration (LLM endpoint, model, etc.)
+├── requirements.txt        # Python dependencies
+├── Dockerfile              # Container build file
+└── README.md               # Documentation
 
 ```
 
