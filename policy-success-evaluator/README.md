@@ -65,7 +65,7 @@ docker build -t policy-success-evaluator .
 
 **Run container**
 ```bash
-docker run -p 8000:8000 --env-file .env policy-success-evaluator
+docker run -p 8000:8000 policy-success-evaluator
 ```
 
 ---
