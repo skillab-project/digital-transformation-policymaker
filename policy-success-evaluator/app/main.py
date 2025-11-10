@@ -5,15 +5,6 @@ Created on Thu Oct 23 13:33:15 2025
 @author: tsoukj
 """
 
-# FastAPI service for KPI → LLM → Policy Recommendations (US #19)
-# ---------------------------------------------------------------
-# • POST /kpi/recommendations : returns structured recommendations
-# • Uses env-configured LLM server compatible with /api/chat/completions
-#
-#
-# Run:
-#   uvicorn main:app --reload --port 8000
-
 from __future__ import annotations
 
 import json
