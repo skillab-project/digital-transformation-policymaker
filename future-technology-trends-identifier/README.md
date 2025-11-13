@@ -105,7 +105,7 @@ uvicorn app.main:app --reload
 
 ### 1. Analyze PDF
 `POST /analyze/pdf`  
-Upload a PDF and start asynchronous analysis.
+Upload a PDF (`file` form-data) and start asynchronous analysis.
 
 **Response:**
 ```json
@@ -120,9 +120,14 @@ Upload a PDF and start asynchronous analysis.
 Check the status of the analysis (`queued`, `running`, `done`, or `error`).  
 When finished, the result is stored as `.json`.
 
-### 3. Map to ESCO
-`POST /map-to-esco`  
-Map extracted technologies to ESCO occupations and/or skills.
+### 3. Download Job Result
+`GET /jobs/{job_id}`  
+Check the status of the analysis (`queued`, `running`, `done`, or `error`).  
+When finished, the result is stored as `.json`.
+
+### 4. Map to ESCO
+`GET /results/{job_id}/download`  
+Returns the generated JSON file (`*.analysis.json` or `*.policy.json`).
 
 **Request:**
 ```json
@@ -146,10 +151,14 @@ Map extracted technologies to ESCO occupations and/or skills.
 }
 ```
 
-### 4. Policy Recommendations
+### 5. Generate Policy Recommendations
 `POST /policy/recommendations`
-Generates policy recommendations for emerging technologies (detected automatically).
+Queues a background job that:
+1. Detects emerging technologies
+2. Calls the LLM for each emerging one
+3. Saves structured policy recommendations to {job_id}.policy.json
 
+**Request:**
 ```json
 {
   "job_id": {job_id},
@@ -161,37 +170,29 @@ Generates policy recommendations for emerging technologies (detected automatical
 **Response:**
 ```json
 {
-  "job_id": "abc123",
-  "result_path": "storage/abc123.policy.json",
+  "job_id": {policy_job_id},
+  "result_path": "storage/{policy_job_id}.policy.json",
   "emerging_count": 3,
   "has_recommendations": true
 }
 ```
 
-**Optional:**
-Add `?include_content=true` to return full recommendations inline:
-
-`POST /policy/recommendations?include_content=true`
+**Results must be retrieved later via:**
+`GET /results/{policy_job_id}/download`
 
 **Response (with inline content):**
 ```json
 {
-  "job_id": "abc123",
-  "result_path": "storage/abc123.policy.json",
-  "emerging_count": 3,
-  "has_recommendations": true,
-  "content": {
-    "emerging": [...],
-    "recommendations": [
-      {
-        "technology": "Quantum Networking",
-        "actions": [
-          {"area": "Training/Reskilling", "action": "Create pilot curricula", "priority": "High"}
-        ]
-      }
-    ],
-    "mapping_evidence": {...}
-  }
+  "emerging": [...],
+  "recommendations": [
+    {
+      "technology": "Quantum Networking",
+      "actions": [
+        {"area": "Training/Reskilling", "action": "Create pilot curricula", "priority": "High"}
+      ]
+    }
+  ],
+  "mapping_evidence": {...}
 }
 ```
 
@@ -201,9 +202,10 @@ Add `?include_content=true` to return full recommendations inline:
 
 1. **Upload a Horizon Europe PDF** → `/analyze/pdf`
 2. **Check job status** → `/jobs/{job_id}`
-3. **Map extracted technologies** → `/map-to-esco`
-4. **Generate policy recommendations** → `/policy/recommendations`
-
+3. **Map extracted technologies to ESCO** → `/map-to-esco`
+4. **Launch policy recommendations** → `/policy/recommendations`
+5. **Check policy job status** → `/jobs/{policy_job_id}`
+6. **Download policy JSON** → `/results/{policy_job_id}/download`
 ---
 
 ## 🧭 API Documentation

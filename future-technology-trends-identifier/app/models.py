@@ -9,7 +9,7 @@ Created on Thu Oct 23 13:33:15 2025
 
 from __future__ import annotations
 
-from typing import List, Optional, Literal, Dict, Union, Any
+from typing import List, Optional, Literal, Dict
 from pydantic import BaseModel, Field, ConfigDict
 
 # ---------------------------------------------------------------------
@@ -114,15 +114,6 @@ class RecommendationItem(BaseModel):
     technology: str
     actions: List[ActionItem]
 
-class PolicyGeneratorOutput(BaseModel):
-    """
-    Full output of the recommendation generator.
-    NOTE: 'recommendations' is a FLAT list (no nested 'recommendations' key).
-    """
-    emerging: List[Technology]
-    recommendations: List[RecommendationItem]
-    mapping_evidence: ESCOMapBoth
-
 class PolicyReq(BaseModel):
     """
     Request to generate policy recommendations.
@@ -165,6 +156,3 @@ class PolicyRecommendationsResponse(BaseModel):
     result_path: str
     emerging_count: int
     has_recommendations: bool
-
-class PolicyRecommendationsResponseWithContent(PolicyRecommendationsResponse):
-    content: Union["PolicyGeneratorOutput", Dict[str, Any]]

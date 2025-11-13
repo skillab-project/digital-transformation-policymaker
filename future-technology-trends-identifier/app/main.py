@@ -26,12 +26,12 @@ import logging
 from pathlib import Path
 import uuid
 from typing import Any, Optional, Union
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, Query
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from .analyzer import load_json, process_pdf, save_json
 from .esco_match import map_technologies_to_esco_occupations, map_technologies_to_esco_skills, map_technologies_to_esco_both, warm_esco_caches
 from .jobs import new_job, set_status, get_job, list_jobs, rehydrate_from_storage, _load_jobs
-from .models import ESCOMapRequest, ESCOMapItem, ESCOMapBoth, JobStatus, PolicyReq, PolicyRecommendationsResponse, PolicyGeneratorOutput, PolicyRecommendationsResponseWithContent
+from .models import ESCOMapRequest, ESCOMapItem, ESCOMapBoth, JobStatus, PolicyReq, PolicyRecommendationsResponse
 from .policy_recs import generate_policy_recommendations
 
 # -----------------------------------------------------------------------------
@@ -178,7 +178,7 @@ def download_result(job_id: str) -> FileResponse:
     return FileResponse(
         path,
         media_type="application/json",
-        filename=f"{job_id}.analysis.json",
+        filename=Path(path).name
     )
 
 # -----------------------------------------------------------------------------
@@ -220,18 +220,17 @@ def map_to_esco(req: ESCOMapRequest) -> Union[list[ESCOMapItem], ESCOMapBoth]:
 # -----------------------------------------------------------------------------
 # Policy recommendations
 # -----------------------------------------------------------------------------
-@app.post("/policy/recommendations", tags=["policy"], response_model=Union[PolicyRecommendationsResponseWithContent, PolicyRecommendationsResponse])
-def policy_recommendations(req: PolicyReq, include_content: bool = Query(False, description="Include the generated JSON payload inline")):
+@app.post("/policy/recommendations", tags=["policy"], response_model=PolicyRecommendationsResponse)
+def policy_recommendations(req: PolicyReq, background_tasks: BackgroundTasks):
     """
-    Generate policy recommendations for *emerging* technologies.
+    Launch an asynchronous job that generates policy recommendations
+    for *emerging* technologies.
 
     Behavior:
-        - If `technologies` is empty and `job_id` is provided, source tech list from job result
-        - Calls `generate_policy_recommendations` which:
-            * classifies emerging vs ESCO evidence
-            * calls LLM per emerging tech
-            * returns a flat list of recommendations + evidence
-        - Persists output as {job_id}.policy.json (uses provided job_id or a new UUID)
+        - Resolve technologies from the request or from a completed analysis job.
+        - Create a new policy job and run the recommendation generation
+          (emerging-tech detection + LLM calls) in the background.
+        - Results are saved to `{job_id}.policy.json`.
 
     Returns:
         Envelope with:
@@ -251,33 +250,30 @@ def policy_recommendations(req: PolicyReq, include_content: bool = Query(False, 
     if not techs:
         raise HTTPException(status_code=400, detail="No technologies provided.")
 
-    out = generate_policy_recommendations(
-        technologies=techs,
-        target=req.target,
-        similarity_threshold=req.similarity_threshold,
-        max_actions_per_tech=req.max_actions_per_tech,
-        llm_model=req.llm_model,
+    policy_job_id = str(uuid.uuid4())
+    out_path = STORAGE / f"{policy_job_id}.policy.json"
+    set_status(policy_job_id, "queued", type="policy")
+
+    def run_policy_job():
+        try:
+            set_status(policy_job_id, "running", type="policy")
+            result = generate_policy_recommendations(
+                technologies=techs,
+                target=req.target,
+                similarity_threshold=req.similarity_threshold,
+                max_actions_per_tech=req.max_actions_per_tech,
+                llm_model=req.llm_model,
+            )
+            save_json(result, str(out_path))
+            set_status(policy_job_id, "done", type="policy", result_path=str(out_path))
+        except Exception as e:
+            set_status(policy_job_id, "error", type="policy", message=str(e))
+
+    background_tasks.add_task(run_policy_job)
+
+    return PolicyRecommendationsResponse(
+        job_id=policy_job_id,
+        result_path=str(out_path),
+        emerging_count=0,           # unknown until finished
+        has_recommendations=False,  # unknown until finished
     )
-
-    out_job_id = req.job_id or str(uuid.uuid4())
-    out_path = STORAGE / f"{out_job_id}.policy.json"
-    save_json(out, str(out_path))
-
-    recs = out.get("recommendations")
-    if isinstance(recs, dict):
-        rec_count = len(recs.get("recommendations", []))
-    elif isinstance(recs, list):
-        rec_count = len(recs)
-    else:
-        rec_count = 0
-
-    resp = {
-        "job_id": out_job_id,
-        "result_path": str(out_path),
-        "emerging_count": len(out.get("emerging", [])),
-        "has_recommendations": rec_count > 0,
-    }
-    if include_content:
-        resp = {**resp, "content": out}
-
-    return resp

@@ -30,48 +30,33 @@ def test_health_endpoint(client):
     assert r.json() == {"ok": True}
 
 
-def test_policy_recommendations_inline_content(client, monkeypatch):
-    # Stub generator & save_json
-    fake_out = {
-        "emerging": [
-            {"name": "Quantum Networking", "description": "...", "domain": "ICT", "occupations": [], "confidence": 0.9}
-        ],
-        "recommendations": [
-            {
-                "technology": "Quantum Networking",
-                "actions": [
-                    {
-                        "area": "Training/Reskilling",
-                        "action": "Create pilot MSc modules",
-                        "rationale": "Skill gap",
-                        "timeframe": "short",
-                        "priority": "High",
-                    }
-                ],
-            }
-        ],
-        "mapping_evidence": {"occupations": [], "skills": []},
-    }
-    monkeypatch.setattr(main_mod, "generate_policy_recommendations", lambda **_k: fake_out)
-    monkeypatch.setattr(main_mod, "save_json", lambda data, path: None)
-
+def test_policy_recommendations_inline_content(client):
+    """
+    /policy/recommendations no longer supports inline content.
+    It should ignore include_content and return only the base response fields.
+    """
     body = {
-        "technologies": [
-            {"name": "Quantum Networking", "description": "...", "domain": "ICT", "occupations": [], "confidence": 0.9}
-        ],
-        "target": "both",
-        "similarity_threshold": 0.5,
-        "max_actions_per_tech": 4,
+        "technologies": [{
+            "name": "AI in Education",
+            "description": "...",
+            "domain": "ICT",
+            "occupations": [],
+            "confidence": 0.8
+        }],
+        "target": "both"
     }
 
     r = client.post("/policy/recommendations?include_content=true", json=body)
-    assert r.status_code == 200, r.text
+    assert r.status_code == 200
     data = r.json()
 
-    assert {"job_id", "result_path", "emerging_count", "has_recommendations", "content"} <= set(data.keys())
-    content = data["content"]
-    assert "emerging" in content and "recommendations" in content and "mapping_evidence" in content
-    assert content["recommendations"][0]["technology"] == "Quantum Networking"
+    # Expected keys (NO 'content')
+    assert set(data.keys()) == {
+        "job_id",
+        "result_path",
+        "emerging_count",
+        "has_recommendations"
+    }
 
 
 def test_map_to_esco_occupations_inline(client, monkeypatch):
