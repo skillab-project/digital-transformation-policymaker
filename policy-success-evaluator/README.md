@@ -3,6 +3,11 @@
 
 A microservice for evaluating the **success of policies and KPIs** within the SKILLAB platform. It analyses KPI trajectories (current vs. target values, time series trends, and gaps) and generates **policy recommendations** aimed at improving or consolidating performance.
 
+It supports two usage modes:
+
+1. **Direct KPI mode** – you send KPI data + scope → get recommendations.  
+2. **Policy mode** – you send a **policy name** (and optionally a specific KPI name) → the service fetches KPI definitions and measurements from the SKILLAB Policy API and then generates recommendations.
+
 ---
 
 ## 🚀 Features
@@ -10,6 +15,14 @@ A microservice for evaluating the **success of policies and KPIs** within the SK
 - **KPI Input & Trend Analysis**  
   Accepts one or more KPIs along with sector, region, and policy context.  
   Automatically computes linear trend, projected time to target, and on/off-track status.
+
+- **Policy-Aware Auto KPI Fetch**  
+  - Integrates with the SKILLAB Policy API (`/policy`, `/report/kpi`).  
+  - Given a `policy_name`, the service fetches:
+    - Policy metadata (sector, region, KPI list),
+    - KPI targets and deadlines,
+    - KPI time series measurements.
+  - Builds internal KPI objects and runs the same evaluation & recommendation pipeline.
 
 - **LLM-Driven Recommendation Engine**  
   Uses a Large Language Model (e.g., Mistral via OpenWebUI or Ollama) to generate actionable, structured policy recommendations based on KPI progress and EU policy priorities.
@@ -23,14 +36,13 @@ A microservice for evaluating the **success of policies and KPIs** within the SK
  
  ## 📂 Project Structure
 
-```
+```bash
 ├── app/
 │   └── main.py             # FastAPI entrypoint and main logic
 ├── .env                    # Environment configuration (LLM endpoint, model, etc.)
 ├── requirements.txt        # Python dependencies
 ├── Dockerfile              # Container build file
 └── README.md               # Documentation
-
 ```
 
 ---
@@ -43,7 +55,7 @@ cd policy-success-evaluator
 pip install -r requirements.txt
 ```
 
-Environment setup:  
+**Environment setup:**
 Create `.env` file:
 ```env
 API_URL=http://localhost:3000
@@ -52,7 +64,10 @@ MODEL_NAME=mistral:latest
 TEMPERATURE=0.1
 SEED=42
 TIMEOUT=60
+POLICY_BASE=https://portal.skillab-project.eu/policy
 ```
+
+`POLICY_BASE` is used by the `/policy/recommendations` endpoint to fetch policy metadata and KPI measurements.
 
 ---
 
@@ -73,14 +88,14 @@ docker run -p 8000:8000 policy-success-evaluator
 ## ▶️ Run the Service
 
 ```bash
-uvicorn main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8000
 ```
 
 ---
 
 ## 📡 API Endpoints
 
-### 1. Generate KPI Recommendations
+### 1. Generate KPI Recommendations – Direct KPI Mode
 `POST /kpi/recommendations`  
 Evaluates one or more KPIs and generates tailored policy recommendations.
 
@@ -150,7 +165,48 @@ Evaluates one or more KPIs and generates tailored policy recommendations.
 ]
 ```
 
-### 2. Health Check
+### 2. Generate KPI Recommendations – Policy Mode (Auto-Fetch from Portal)
+`POST /policy/recommendations`  
+This endpoint integrates with the SKILLAB Policy API and automatically:
+1. Fetches policy metadata (incl. KPI list) by policy_name.
+2. Fetches KPI measurements (`/report/kpi?kpiName=...`) for each KPI in that policy.
+3. Converts each KPI into the internal `KPI` schema (current value, time series, target, deadline).
+4. Runs trend analysis and the LLM recommendation engine.
+
+You can:
+- Get recommendations for all KPIs of a policy.
+- Or restrict to one specific KPI using kpi_name.
+
+**Request - all KPIs of a policy:**
+```json
+{
+  "policy_name": "Digital Boost 2026"
+}
+```
+
+**Request - only one specific KPI of that policy:**
+```json
+{
+  "policy_name": "Digital Boost 2026",
+  "kpi_name": "SME Digital Adoption Rate v4"
+}
+```
+
+**Response:**
+```json
+[
+  {
+    "kpi_id": "kpi_digital_adoption",
+    "trend_analysis": "Increasing at +1.15 per quarter. On current pace, target met in ~16 quarters. This is off track relative to deadline 2026-Q4.",
+    "recommendations": [
+		// Similar to above
+      }
+    ]
+  }
+]
+```
+
+### 3. Health Check
 `GET /health`  
 Returns service status and active model.
 
@@ -162,7 +218,6 @@ Returns service status and active model.
 ---
 
 ## 🧪 Example Workflow
-
 1. **Send KPIs & context** → `/kpi/recommendations`
 2. **Service calculates trends** and identifies if each KPI is on or off track
 3. **LLM generates structured recommendations** according to policy type

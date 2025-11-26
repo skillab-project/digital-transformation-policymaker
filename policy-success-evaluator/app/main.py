@@ -12,6 +12,8 @@ import math
 import os
 import re
 import time
+import requests
+from dateutil import parser
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -31,6 +33,7 @@ class Settings(BaseModel):
     temperature: float = float(os.getenv("TEMPERATURE", "0.1"))
     seed: int = int(os.getenv("SEED", "42"))
     timeout: int = int(os.getenv("TIMEOUT", "60"))
+    policy_base: str = os.getenv("POLICY_BASE", "https://portal.skillab-project.eu/policy")
 
 settings = Settings()
 
@@ -89,6 +92,10 @@ class RecsResponse(BaseModel):
     kpi_id: str
     trend_analysis: Optional[str] = None
     recommendations: List[RecommendationItem]
+
+class PolicyRequest(BaseModel):
+    policy_name: str
+    kpi_name: Optional[str] = None
 
 # =========================
 # Trend utilities
@@ -158,6 +165,77 @@ def describe_trend(kpi: KPI) -> Dict[str, Any]:
         "on_track": on_track,
         "trend_summary": summary,
     }
+
+# =================
+# Fetch Policy data
+# =================
+def fetch_policy_metadata(policy_name: str):
+    url = f"{settings.policy_base}/policy"
+    res = requests.get(url, params={"name": policy_name})
+
+    if res.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch policy metadata: {res.status_code}"
+        )
+
+    data = res.json()
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No policy found with name '{policy_name}'"
+        )
+
+    return data
+
+def fetch_kpi_timeseries(kpi_name: str) -> List[TimePoint]:
+    url = f"{settings.policy_base}/report/kpi"
+    res = requests.get(url, params={"kpiName": kpi_name})
+
+    if res.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch measurements for KPI '{kpi_name}': {res.status_code}"
+        )
+
+    entries = res.json()
+    timeseries = []
+
+    for entry in entries:
+        dt = parser.parse(entry["date"])
+        quarter = (dt.month - 1) // 3 + 1
+        period = f"{dt.year}-Q{quarter}"
+
+        timeseries.append(TimePoint(
+            period=period,
+            value=entry["value"]
+        ))
+
+    timeseries = sorted(timeseries, key=lambda x: x.period)
+    return timeseries
+
+def build_kpi_from_policy_meta(kpi_meta, timeseries: List[TimePoint]) -> KPI:
+    # Last measurement = current value
+    current_value = timeseries[-1].value if timeseries else 0.0
+
+    # Convert `31/12/2026` to `2026-Q4`
+    try:
+        d, m, y = kpi_meta["targetTime"].split("/")
+        quarter = (int(m) - 1) // 3 + 1
+        target_deadline = f"{y}-Q{quarter}"
+    except:
+        target_deadline = "2030-Q4"
+
+    return KPI(
+        id=str(kpi_meta["id"]),
+        name=kpi_meta["name"],
+        unit="percentage",               # you may refine later
+        direction="higher_is_better",    # default for digital KPIs
+        current_value=current_value,
+        target_value=kpi_meta["targetValue"],
+        target_deadline=target_deadline,
+        time_series=timeseries
+    )
 
 # =========================
 # LLM client (JSON-enforced)
@@ -361,6 +439,60 @@ def kpi_recommendations(req: RecsRequest):
                 status_code=500,
                 detail=f"Invalid LLM JSON schema for KPI '{kpi.id}': {ve}"
             )
+
+    return results
+
+@app.post("/policy/recommendations", response_model=List[RecsResponse])
+def policy_recommendations(req: PolicyRequest):
+    # Step 1 — Get policy metadata
+    policy = fetch_policy_metadata(req.policy_name)
+
+    results: List[RecsResponse] = []
+
+    target_kpi_name = (req.kpi_name or "").strip()
+
+    # Step 2 — Loop through all KPIs in the policy
+    for kpi_meta in policy.get("kpiList", []):
+        kpi_name = kpi_meta["name"]
+
+        # If user asked for a specific KPI, skip others
+        if target_kpi_name and kpi_name != target_kpi_name:
+            continue
+
+        # Step 3 — Fetch KPI time-series from SKILLAB Portal API
+        ts = fetch_kpi_timeseries(kpi_name)
+
+        # Step 4 — Convert to internal KPI object
+        kpi_obj = build_kpi_from_policy_meta(kpi_meta, ts)
+
+        # Step 5 — Trend analysis
+        trend = describe_trend(kpi_obj) if ts else {"trend_summary": None, "on_track": None}
+
+        # Step 6 — LLM recommendations
+        raw = call_llm_for_recommendations(
+            kpi=kpi_obj,
+            scope=Scope(
+                sector=policy.get("sector", "Unknown"),
+                region=policy.get("region", "Unknown"),
+                policy=policy.get("name", req.policy_name)
+            ),
+            trend_summary=trend.get("trend_summary"),
+            on_track=trend.get("on_track")
+        )
+
+        # Step 7 — Build response
+        results.append(RecsResponse(
+            kpi_id=kpi_obj.id,
+            trend_analysis=trend.get("trend_summary"),
+            recommendations=raw.get("recommendations", [])
+        ))
+
+    if target_kpi_name and not results:
+        # user asked for a specific KPI but it wasn't found in policy.kpiList
+        raise HTTPException(
+            status_code=404,
+            detail=f"KPI '{target_kpi_name}' not found in policy '{req.policy_name}'"
+        )
 
     return results
 
