@@ -55,7 +55,12 @@ def test_kpi_recommendations_multiple(monkeypatch):
                 # No time series is also supported
             },
         ],
-        "scope": {"sector": "Manufacturing", "region": "EL52", "policy": "Digital & Green Transition"},
+        "scope": {
+            "sector": "Manufacturing",
+            "region": "EL52",
+            "policy": "Digital & Green Transition",
+            "description": "Industrial decarbonisation and digital transformation initiative"
+        },
     }
 
     r = client.post("/kpi/recommendations", json=payload)
