@@ -316,7 +316,7 @@ def call_llm_for_recommendations(kpi: KPI, scope: Scope, trend_summary: Optional
         f"- Sector: {scope.sector}\n"
         f"- Region: {scope.region}\n"
         f"- Policy Name: {scope.policy}\n"
-        f"- Policy Description: {scope.description or 'N/A'}\n"
+        f"- Policy Description: {scope.description}\n"
         f"- {mode_line}\n"
     )
 
@@ -423,7 +423,6 @@ def call_llm_for_recommendations(kpi: KPI, scope: Scope, trend_summary: Optional
 
     return _chat_json(payload, timeout=settings.timeout + 10)
 
-
 # =========================
 # FastAPI app
 # =========================
@@ -486,13 +485,15 @@ def policy_recommendations(req: PolicyRequest):
         trend = describe_trend(kpi_obj) if ts else {"trend_summary": None, "on_track": None}
 
         # Step 6 — LLM recommendations
+        safe_desc = (policy.get("description") or "").replace("\n", " ").replace("\r", " ")
+        
         raw = call_llm_for_recommendations(
             kpi=kpi_obj,
             scope=Scope(
                 sector=policy.get("sector", "Unknown"),
                 region=policy.get("region", "Unknown"),
                 policy=policy.get("name", req.policy_name),
-                policy_description = policy.get("description", None)
+                description=safe_desc
             ),
             trend_summary=trend.get("trend_summary"),
             on_track=trend.get("on_track")
