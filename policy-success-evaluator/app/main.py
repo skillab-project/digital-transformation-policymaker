@@ -16,9 +16,8 @@ import requests
 from dateutil import parser
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, ValidationError, validator
 from dotenv import load_dotenv
 
 # =========================
@@ -73,6 +72,7 @@ class Scope(BaseModel):
     sector: str
     region: str
     policy: str
+    description: str
 
 class RecsRequest(BaseModel):
     kpis: List[KPI]
@@ -131,35 +131,51 @@ def describe_trend(kpi: KPI) -> Dict[str, Any]:
     ts = kpi.time_series or []
     if len(ts) < 3:
         return {"trend_summary": "Insufficient history to assess trend reliably."}
+    
     points = sorted(ts, key=lambda p: _to_ordinal(p.period)[0])
     ords = [_to_ordinal(p.period)[0] for p in points]
     freq = _to_ordinal(points[-1].period)[1]
+    
     x = [o - ords[0] for o in ords]
     y = [p.value for p in points]
+    
     slope = _linreg_slope(x, y)  # value per period
     eps = 1e-9
+    
+    # Signed gap
     if kpi.direction == "higher_is_better":
         signed_gap = kpi.target_value - kpi.current_value
         improving = slope > eps
     else:
         signed_gap = kpi.current_value - kpi.target_value
         improving = slope < -eps
+    
     abs_gap = abs(signed_gap)
-    if abs(slope) > eps and ((kpi.direction == "higher_is_better" and slope > 0) or (kpi.direction == "lower_is_better" and slope < 0)):
+    
+    # Projected periods to reach goal
+    if abs(slope) > eps and improving:
         projected = math.ceil(abs_gap / abs(slope))
     else:
         projected = math.inf
-    # periods until deadline
+    
+    # Time to deadline
     last_period = points[-1].period
     until_deadline = _to_ordinal(kpi.target_deadline)[0] - _to_ordinal(last_period)[0]
+    
+    # Whether KPI will meet target before deadline
     on_track = projected != math.inf and projected <= max(0, until_deadline)
+    
+    # Human-readable summary
     per = "per quarter" if freq == "Q" else "per month"
     pace = "increasing" if slope > eps else ("decreasing" if slope < -eps else "flat")
     eta = (f"~{projected} {'quarters' if freq=='Q' else 'months'}") if projected != math.inf else "not reachable at current pace"
     meets = "on track" if on_track else "off track"
+    
     summary = f"{pace.capitalize()} at {slope:+.2f} {per}. On current pace, target met in {eta}. This is {meets} relative to deadline {kpi.target_deadline}."
+    
     return {
         "slope_per_period": slope,
+        "improving": improving,
         "projected_periods_to_target": None if projected == math.inf else projected,
         "periods_until_deadline": until_deadline,
         "on_track": on_track,
@@ -299,7 +315,8 @@ def call_llm_for_recommendations(kpi: KPI, scope: Scope, trend_summary: Optional
         f"- Target Deadline: {kpi.target_deadline}\n"
         f"- Sector: {scope.sector}\n"
         f"- Region: {scope.region}\n"
-        f"- Policy: {scope.policy}\n"
+        f"- Policy Name: {scope.policy}\n"
+        f"- Policy Description: {scope.description or 'N/A'}\n"
         f"- {mode_line}\n"
     )
 
@@ -474,7 +491,8 @@ def policy_recommendations(req: PolicyRequest):
             scope=Scope(
                 sector=policy.get("sector", "Unknown"),
                 region=policy.get("region", "Unknown"),
-                policy=policy.get("name", req.policy_name)
+                policy=policy.get("name", req.policy_name),
+                policy_description = policy.get("description", None)
             ),
             trend_summary=trend.get("trend_summary"),
             on_track=trend.get("on_track")
