@@ -13,7 +13,7 @@ It supports two usage modes:
 ## 🚀 Features
 
 - **KPI Input & Trend Analysis**  
-  Accepts one or more KPIs along with sector, region, and policy context.  
+  Accepts one or more KPIs along with policy context, namely policy name sector, region, and description.  
   Automatically computes linear trend, projected time to target, and on/off-track status.
 
 - **Policy-Aware Auto KPI Fetch**  
@@ -121,7 +121,8 @@ Evaluates one or more KPIs and generates tailored policy recommendations.
   "scope": {
     "sector": "SMEs",
     "region": "Central Macedonia, Greece",
-    "policy": "Digital Boost 2024"
+    "policy": "Digital Boost 2024",
+	"description": "A regional initiative supporting SME digitalisation through targeted incentives and skills development."
   }
 }
 
