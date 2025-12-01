@@ -31,6 +31,9 @@ It supports two usage modes:
   Dynamically adjusts lever types and intervention intensity depending on whether a KPI is improving or stagnating.  
   On-track KPIs → consolidation and monitoring.  
   Off-track KPIs → accelerators (funding, training, regulation, etc.).
+
+- **Asynchronous Job Processing**
+  LLM-Driven tasks run in the background.  
  
  ---
  
@@ -95,7 +98,7 @@ uvicorn app.main:app --reload --port 8000
 
 ## 📡 API Endpoints
 
-### 1. Generate KPI Recommendations – Direct KPI Mode
+### 1. Generate KPI Recommendations – Direct KPI Evaluation (Synchronous)
 `POST /kpi/recommendations`  
 Evaluates one or more KPIs and generates tailored policy recommendations.
 
@@ -166,7 +169,7 @@ Evaluates one or more KPIs and generates tailored policy recommendations.
 ]
 ```
 
-### 2. Generate KPI Recommendations – Policy Mode (Auto-Fetch from Portal)
+### 2. Generate KPI Recommendations – Policy-Based Evaluation (Synchronous)
 `POST /policy/recommendations`  
 This endpoint integrates with the SKILLAB Policy API and automatically:
 1. Fetches policy metadata (incl. KPI list) by policy_name.
@@ -207,7 +210,64 @@ You can:
 ]
 ```
 
-### 3. Health Check
+### 3. Generate KPI Recommendations – Direct KPI Evaluation (Async Job-Based)
+`POST /jobs/kpi`  
+Same functionality as **1. `POST /kpi/recommendations`** but runs in the background asynchronously.
+
+**Request:**
+Similar to `POST /kpi/recommendations` synchronous endpoint.
+
+**Response:**
+```json
+{
+	"job_id": "c4a1f90e-5f17-4ac3-9fb9-2a408bd54042",
+	"status_url": "http://localhost:8000/jobs/c4a1f90e-5f17-4ac3-9fb9-2a408bd54042"
+}
+```
+
+### 4. Generate KPI Recommendations – Policy-Based Evaluation (Async Job-Based)
+`POST /jobs/policy`  
+Same functionality as **2. `POST /policy/recommendations`** but runs in the background asynchronously.
+
+**Request:**
+Similar to `POST /policy/recommendations` synchronous endpoint.
+
+**Response:**
+```json
+{
+	"job_id": "c4a1f90e-5f17-4ac3-9fb9-2a408bd54042",
+	"status_url": "http://localhost:8000/jobs/c4a1f90e-5f17-4ac3-9fb9-2a408bd54042"
+}
+```
+
+### 5. Generate KPI Recommendations – Policy-Based Evaluation (Async Job-Based)
+`GET /jobs/{job_id}`
+
+**Response (running):**
+```json
+{
+	"status": "running",
+	"result": null,
+	"error": null
+}
+```
+
+**Response (success):**
+```json
+{
+	"status": "success",
+	"result": [
+		{
+			"kpi_id": "kpi_digital_adoption",
+			"trend_analysis": "...",
+			"recommendations": [...]
+		}
+	],
+	"error": null
+}
+```
+
+### 6. Health Check
 `GET /health`  
 Returns service status and active model.
 
@@ -219,10 +279,19 @@ Returns service status and active model.
 ---
 
 ## 🧪 Example Workflow
+
+### Synchronous
 1. **Send KPIs & context** → `/kpi/recommendations`
 2. **Service calculates trends** and identifies if each KPI is on or off track
 3. **LLM generates structured recommendations** according to policy type
 4. **Response returned as JSON**
+
+### Async Job-Based
+1. **Send KPIs & context via and async job** → `/jobs/kpi`
+2. **Receive** `job_id`
+2. **Poll** `/jobs/{job_id}` every 2–5 seconds
+3. **Wait for** `status="success"`
+4. **Fetch results**
 
 ---
 

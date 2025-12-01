@@ -16,9 +16,10 @@ import requests
 from dateutil import parser
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel, ValidationError, validator
 from dotenv import load_dotenv
+from uuid import uuid4
 
 # =========================
 # Config (env-based)
@@ -42,6 +43,9 @@ HEADERS = {
     "Content-Type": "application/json",
     "User-Agent": "SKILLAB-KPI-Recs/1.0",
 }
+
+# In-memory job store
+JOB_STORE = {}
 
 # =========================
 # Schemas
@@ -424,12 +428,116 @@ def call_llm_for_recommendations(kpi: KPI, scope: Scope, trend_summary: Optional
     return _chat_json(payload, timeout=settings.timeout + 10)
 
 # =========================
+# Analysis jobs
+# =========================
+def run_kpi_job(job_id: str, req: RecsRequest):
+    try:
+        JOB_STORE[job_id]["status"] = "running"
+        results = []
+
+        for kpi in req.kpis:
+            # Compute trend
+            trend = describe_trend(kpi) if kpi.time_series else {"trend_summary": None, "on_track": None}
+            trend_summary = trend.get("trend_summary")
+            on_track = trend.get("on_track")
+
+            raw = call_llm_for_recommendations(kpi, req.scope, trend_summary, on_track=on_track)
+
+            results.append({
+                "kpi_id": raw.get("kpi_id", kpi.id),
+                "trend_analysis": trend_summary,
+                "recommendations": raw.get("recommendations", [])
+            })
+
+        JOB_STORE[job_id]["status"] = "success"
+        JOB_STORE[job_id]["result"] = results
+
+    except Exception as e:
+        JOB_STORE[job_id]["status"] = "error"
+        JOB_STORE[job_id]["error"] = str(e)
+
+def run_policy_job(job_id: str, req: PolicyRequest):
+    try:
+        JOB_STORE[job_id]["status"] = "running"
+        results = []
+
+        policy = fetch_policy_metadata(req.policy_name)
+        target_kpi_name = (req.kpi_name or "").strip()
+
+        for kpi_meta in policy.get("kpiList", []):
+            kpi_name = kpi_meta["name"]
+            if target_kpi_name and kpi_name != target_kpi_name:
+                continue
+
+            ts = fetch_kpi_timeseries(kpi_name)
+            kpi_obj = build_kpi_from_policy_meta(kpi_meta, ts)
+            trend = describe_trend(kpi_obj) if ts else {"trend_summary": None, "on_track": None}
+
+            safe_desc = (policy.get("description") or "").replace("\n", " ").replace("\r", " ")
+
+            raw = call_llm_for_recommendations(
+                kpi=kpi_obj,
+                scope=Scope(
+                    sector=policy.get("sector", "Unknown"),
+                    region=policy.get("region", "Unknown"),
+                    policy=policy.get("name", req.policy_name),
+                    description=safe_desc
+                ),
+                trend_summary=trend.get("trend_summary"),
+                on_track=trend.get("on_track")
+            )
+
+            results.append({
+                "kpi_id": kpi_obj.id,
+                "trend_analysis": trend.get("trend_summary"),
+                "recommendations": raw.get("recommendations", [])
+            })
+
+        JOB_STORE[job_id]["status"] = "success"
+        JOB_STORE[job_id]["result"] = results
+
+    except Exception as e:
+        JOB_STORE[job_id]["status"] = "error"
+        JOB_STORE[job_id]["error"] = str(e)
+
+# =========================
 # FastAPI app
 # =========================
 app = FastAPI(title="SKILLAB KPI Recommendation Service", version="1.0.0")
 
+@app.post("/jobs/kpi")
+def create_kpi_job(req: RecsRequest, background: BackgroundTasks, request: Request):
+    if len(req.kpis) > 10:
+        raise HTTPException(400, "Too many KPIs; max allowed is 10.")
+
+    job_id = str(uuid4())
+    JOB_STORE[job_id] = {"status": "pending", "result": None, "error": None}
+
+    background.add_task(run_kpi_job, job_id, req)
+
+    return {"job_id": job_id, "status_url": f"{request.base_url}jobs/{job_id}"}
+
+@app.post("/jobs/policy")
+def create_policy_job(req: PolicyRequest, background: BackgroundTasks, request: Request):
+    job_id = str(uuid4())
+    JOB_STORE[job_id] = {"status": "pending", "result": None, "error": None}
+
+    background.add_task(run_policy_job, job_id, req)
+
+    return {"job_id": job_id, "status_url": f"{request.base_url}jobs/{job_id}"}
+
+@app.get("/jobs/{job_id}")
+def get_job_status(job_id: str):
+    if job_id not in JOB_STORE:
+        raise HTTPException(status_code=404, detail="Job ID not found")
+
+    return JOB_STORE[job_id]
+
 @app.post("/kpi/recommendations", response_model=List[RecsResponse])
 def kpi_recommendations(req: RecsRequest):
+    if len(req.kpis) > 10:
+        raise HTTPException(400, "Too many KPIs; max allowed is 10.")
+
     results: List[RecsResponse] = []
 
     for kpi in req.kpis:
