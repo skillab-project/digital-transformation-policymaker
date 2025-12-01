@@ -240,7 +240,7 @@ Similar to `POST /policy/recommendations` synchronous endpoint.
 }
 ```
 
-### 5. Generate KPI Recommendations – Policy-Based Evaluation (Async Job-Based)
+### 5. Poll Job Status
 `GET /jobs/{job_id}`
 
 **Response (running):**
