@@ -99,6 +99,7 @@ pipeline {
 						sh 'docker login ${DOCKER_REG} -u ${USERNAME} -p ${PASSWORD}'
 						sh 'docker network inspect shared-net >/dev/null 2>&1 || docker network create shared-net'
 						sh 'DOCKER_TAG=${DOCKER_TAG} docker compose -f docker-compose.yml pull'
+						sh 'docker rm -f policy-success-evaluator || true'
 						sh 'DOCKER_TAG=${DOCKER_TAG} docker compose -f docker-compose.yml up -d --remove-orphans'
 						sh 'docker compose -f docker-compose.yml ps'
 					}
