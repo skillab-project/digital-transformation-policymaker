@@ -1,11 +1,19 @@
-
 services:
-  api:
+  future-technology-trends-identifier:
+    container_name: future-technology-trends-identifier
     build: .
+    image: ${DOCKER_REG}${DOCKER_REPO}future-technology-trends-identifier:${DOCKER_TAG}
     env_file:
       - .env
     ports:
-      - "8000:8000"
+      - "8876:8876"
     volumes:
       - ./storage:/app/storage
-      - ./datasets:/app/datasets
+      - ./esco_data:/app/esco_data
+    networks:
+      - shared-net
+    restart: unless-stopped
+networks:
+  shared-net:
+    external: true
+    name: shared-net

@@ -46,7 +46,7 @@ pipeline {
             steps {
                 echo "***** Building Docker Image *****"
 				dir('future-technology-trends-identifier') {
-					sh "docker build -t ${APP_NAME}:test ."
+					sh "DOCKER_TAG=test docker compose -f docker-compose.yml build"
 				}
             }
         }
@@ -58,7 +58,7 @@ pipeline {
             steps {
                 echo "***** Running Unit Tests *****"
 				dir('future-technology-trends-identifier') {
-					sh "docker run --rm --env-file .env -e PYTHONPATH=/app ${APP_NAME}:test pytest -q"
+					sh "DOCKER_TAG=test docker compose -f docker-compose.yml run --rm -e PYTHONPATH=/app future-technology-trends-identifier pytest -q"
 				}
             }
         }
@@ -73,12 +73,12 @@ pipeline {
             steps {
                 withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_REG_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
                     echo "***** Push Docker Image *****"
-                    sh 'docker tag ${APP_NAME}:test ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
                     sh 'docker login ${DOCKER_REG} -u ${USERNAME} -p ${PASSWORD}'
+                    sh 'docker tag ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:test ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
                     sh 'docker push ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
 					
 					// Also tag and push as latest
-                    sh 'docker tag ${APP_NAME}:test ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:latest'
+                    sh 'docker tag ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:test ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:latest'
                     sh 'docker push ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:latest'
                 }
             }
@@ -97,11 +97,10 @@ pipeline {
                     echo "***** Deploy Application *****"
 					dir('future-technology-trends-identifier') {
 						sh 'docker login ${DOCKER_REG} -u ${USERNAME} -p ${PASSWORD}'
-						sh 'docker pull ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
-						sh 'docker stop ${APP_NAME} || true'
-						sh 'docker rm ${APP_NAME} || true'
-						sh 'docker run -d --env-file .env --name ${APP_NAME} -p 8876:8876 ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}'
-						sh 'docker ps'
+						sh 'docker network inspect shared-net >/dev/null 2>&1 || docker network create shared-net'
+						sh 'DOCKER_TAG=${DOCKER_TAG} docker compose -f docker-compose.yml pull'
+						sh 'DOCKER_TAG=${DOCKER_TAG} docker compose -f docker-compose.yml up -d --remove-orphans'
+						sh 'docker compose -f docker-compose.yml ps'
 					}
                 }
             }
@@ -110,12 +109,12 @@ pipeline {
     post{
         always {
             // Remove specific images
-            sh 'docker rmi ${APP_NAME}:test || true'
+            sh 'docker rmi ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:test || true'
         }
         failure {
             echo "Build failed. Cleaned up docker environment."
-            sh 'docker rmi ${APP_NAME}:${DOCKER_TAG} || true'
-            sh 'docker rmi ${APP_NAME}:latest || true'
+            sh 'docker rmi ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG} || true'
+            sh 'docker rmi ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:latest || true'
         }
     }
 }
