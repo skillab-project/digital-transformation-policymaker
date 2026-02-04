@@ -1,0 +1,18 @@
+services:
+  policy-success-evaluator:
+    container_name: policy-success-evaluator
+    build: .
+    image: ${DOCKER_REG}${DOCKER_REPO}policy-success-evaluator:${DOCKER_TAG}
+    env_file:
+      - .env
+    environment:
+      POLICY_BASE: "http://backend-policy:8080"
+    ports:
+      - "8878:8878"
+    networks:
+      - shared-net
+    restart: unless-stopped
+networks:
+  shared-net:
+    external: true
+    name: shared-net
