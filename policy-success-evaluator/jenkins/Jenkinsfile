@@ -58,7 +58,19 @@ pipeline {
             steps {
                 echo "***** Running Unit Tests *****"
 				dir('policy-success-evaluator') {
-					sh "DOCKER_TAG=test docker compose -f docker-compose.yml run --rm policy-success-evaluator pytest -q"
+					sh "DOCKER_TAG=test docker compose -f docker-compose.yml run --rm policy-success-evaluator pytest -q tests/unit"
+				}
+            }
+        }
+
+		// *********************************
+        // *** RUN THE INTEGRATION TESTS ***
+        // *********************************
+        stage("Run_Integration_Tests"){
+            steps {
+                echo "***** Running Integration Tests *****"
+				dir('policy-success-evaluator') {
+					sh "DOCKER_TAG=test docker compose -f docker-compose.yml run --rm policy-success-evaluator pytest -q tests/integration"
 				}
             }
         }
