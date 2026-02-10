@@ -4,7 +4,8 @@ FROM python:3.11-slim
 # Basic env for containers
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
 
 # Workdir
 WORKDIR /app
