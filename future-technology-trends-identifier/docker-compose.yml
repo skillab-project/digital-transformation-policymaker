@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     environment:
-      API_URL: ${API_URL}
+      API_URL: http://160.40.52.27:3000
       API_TOKEN: ${API_TOKEN}
     ports:
       - "8876:8876"
