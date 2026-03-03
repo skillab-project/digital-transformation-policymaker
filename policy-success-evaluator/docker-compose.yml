@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     environment:
-      API_URL: ${API_URL}
+      API_URL: http://160.40.52.27:3000
       API_TOKEN: ${API_TOKEN}
       POLICY_BASE: "http://backend-policy:8080"
     ports:
