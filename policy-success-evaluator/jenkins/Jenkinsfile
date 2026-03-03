@@ -30,9 +30,9 @@ pipeline {
 							# copy defaults from example
 							cp .env.example .env
 							
-							# override or append credentials
-							sed -i "s|^API_TOKEN=.*|API_TOKEN=${API_PASS}|" .env || echo "API_TOKEN=${API_PASS}" >> .env
-							sed -i "s|^API_URL=.*|API_URL=http://160.40.52.27:3000|" .env || echo "API_URL=http://160.40.52.27:3000" >> .env
+							# override LLM credentials
+                            export API_TOKEN=${API_PASS}
+                            export API_URL=http://160.40.52.27:3000
 						"""
 					}
 				}
