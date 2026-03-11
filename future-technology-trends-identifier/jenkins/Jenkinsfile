@@ -15,6 +15,17 @@ pipeline {
     }
 
     stages {
+        // *************************
+        // *** PREPARATION STAGE ***
+        // *************************
+        stage('Preparation') {
+            steps {
+                echo "***** Cleaning Workspace and Checking Out Code *****"
+                cleanWs()
+                checkout scm
+            }
+        }
+        
 		// *********************************
         // *** CREATE .env from Jenkins ****
         // *********************************
