@@ -12,7 +12,6 @@ A microservice for analyzing **Future Technology Trends** from unstructured sour
 - **LLM-based Technology Extraction**  
   Each chunk is processed through a local or remote LLM (e.g., Mistral via Ollama/OpenWebUI). Output is structured JSON listing technologies, domains, occupations, and confidence scores.  
 - **Job-based Processing**  
-  Long analyses run asynchronously. Each request returns a `job_id`, which can be polled until the analysis is complete.  
   Long analyses run asynchronously. Each request is user-linked via an optional `user_id` and returns a `job_id`, which can be polled until the analysis is complete.  
 - **JSON Storage**  
   Results are stored as a human-readable `.analysis.json` or `.policy.json` files in `/storage`.  
