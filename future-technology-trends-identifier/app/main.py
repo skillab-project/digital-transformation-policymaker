@@ -26,12 +26,12 @@ import logging
 from pathlib import Path
 import uuid
 from typing import Any, Optional, Union
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from .analyzer import load_json, process_pdf, save_json
 from .esco_match import map_technologies_to_esco_occupations, map_technologies_to_esco_skills, map_technologies_to_esco_both, warm_esco_caches
 from .jobs import new_job, set_status, get_job, list_jobs, rehydrate_from_storage, _load_jobs
-from .models import ESCOMapRequest, ESCOMapItem, ESCOMapBoth, JobStatus, PolicyReq, PolicyRecommendationsResponse
+from .models import ESCOMapRequest, ESCOMapItem, ESCOMapBoth, JobStatus, PolicyReq, PolicyRecommendationsResponse, UserResultItem
 from .policy_recs import generate_policy_recommendations
 
 # -----------------------------------------------------------------------------
@@ -61,6 +61,50 @@ def _sha256(data: bytes) -> str:
     h = hashlib.sha256()
     h.update(data)
     return h.hexdigest()
+
+
+def _build_user_result_item(job_id: str, info: dict[str, Any], result_type: str, include_content: bool) -> UserResultItem:
+    """Shape a completed stored result into a frontend-friendly response item."""
+    result_path = info.get("result_path")
+    if not result_path:
+        raise HTTPException(status_code=500, detail=f"Missing result path for job {job_id}")
+
+    path = Path(result_path)
+    if not path.exists():
+        raise HTTPException(status_code=500, detail=f"Result file not found for job {job_id}")
+
+    content = load_json(str(path)) if include_content else None
+    return UserResultItem(
+        job_id=job_id,
+        status="done",
+        user_id=str(info.get("user_id", "")),
+        result_path=str(path),
+        type=result_type,  # type: ignore[arg-type]
+        source_job_id=info.get("source_job_id"),
+        message=info.get("message"),
+        content=content,
+    )
+
+
+def _list_user_results(user_id: str, result_type: str, include_content: bool) -> list[UserResultItem]:
+    """Return completed analysis/policy results for a specific user."""
+    suffix = ".analysis.json" if result_type == "analysis" else ".policy.json"
+    items: list[UserResultItem] = []
+
+    for job_id, info in list_jobs().items():
+        if info.get("status") != "done":
+            continue
+        if info.get("user_id") != user_id:
+            continue
+
+        result_path = info.get("result_path")
+        if not result_path or not str(result_path).endswith(suffix):
+            continue
+
+        items.append(_build_user_result_item(job_id, info, result_type, include_content))
+
+    items.sort(key=lambda item: item.job_id, reverse=True)
+    return items
 
 # -----------------------------------------------------------------------------
 # Lifecycle
@@ -92,7 +136,12 @@ def health() -> dict[str, bool]:
 # Analysis: upload & jobs
 # -----------------------------------------------------------------------------
 @app.post("/analyze/pdf", response_model=JobStatus, tags=["analysis"])
-async def analyze_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...), query: Optional[str] = None) -> JobStatus:
+async def analyze_pdf(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    query: Optional[str] = None,
+    user_id: Optional[str] = Form(default=None),
+) -> JobStatus:
     """
     Enqueue PDF analysis.
 
@@ -121,12 +170,15 @@ async def analyze_pdf(background_tasks: BackgroundTasks, file: UploadFile = File
             info.get("status") == "done"
             and info.get("file_hash") == file_hash
             and info.get("result_path")
+            and info.get("user_id") == user_id
         ):
             return JobStatus(
                 job_id=jid,
                 status="done",
                 message="Duplicate PDF detected. Reusing previous result.",
                 result_path=info["result_path"],
+                user_id=info.get("user_id"),
+                source_job_id=info.get("source_job_id"),
             )
 
     # New job
@@ -137,19 +189,38 @@ async def analyze_pdf(background_tasks: BackgroundTasks, file: UploadFile = File
     def _run() -> None:
         """Background task: process the PDF and persist the analysis JSON."""
         try:
-            set_status(job_id, "running", message="Processing PDF", file_hash=file_hash)
+            set_status(
+                job_id,
+                "running",
+                message="Processing PDF",
+                file_hash=file_hash,
+                user_id=user_id,
+            )
             result: dict[str, Any] = process_pdf(str(tmp_path), query=query)
 
             out_path = STORAGE / f"{job_id}.analysis.json"
             save_json(result, str(out_path))
 
-            set_status(job_id, "done", result_path=str(out_path), file_hash=file_hash)
+            set_status(
+                job_id,
+                "done",
+                result_path=str(out_path),
+                file_hash=file_hash,
+                user_id=user_id,
+            )
         except Exception as exc:  # noqa: BLE001 - bubble through as status
             log.exception("PDF analysis failed for job %s: %s", job_id, exc)
-            set_status(job_id, "error", message=str(exc), file_hash=file_hash)
+            set_status(
+                job_id,
+                "error",
+                message=str(exc),
+                file_hash=file_hash,
+                user_id=user_id,
+            )
 
     background_tasks.add_task(_run)
-    return JobStatus(job_id=job_id, status="queued")
+    set_status(job_id, "queued", user_id=user_id)
+    return JobStatus(job_id=job_id, status="queued", user_id=user_id)
 
 @app.get("/jobs/{job_id}", response_model=JobStatus, tags=["analysis"])
 def job_status(job_id: str) -> JobStatus:
@@ -180,6 +251,18 @@ def download_result(job_id: str) -> FileResponse:
         media_type="application/json",
         filename=Path(path).name
     )
+
+
+@app.get("/users/{user_id}/analyses", response_model=list[UserResultItem], tags=["analysis"])
+def list_user_analyses(user_id: str, include_content: bool = Query(default=False)) -> list[UserResultItem]:
+    """List completed analysis results stored for a specific user."""
+    return _list_user_results(user_id, "analysis", include_content)
+
+
+@app.get("/users/{user_id}/policies", response_model=list[UserResultItem], tags=["policy"])
+def list_user_policies(user_id: str, include_content: bool = Query(default=False)) -> list[UserResultItem]:
+    """List completed policy recommendation results stored for a specific user."""
+    return _list_user_results(user_id, "policy", include_content)
 
 # -----------------------------------------------------------------------------
 # ESCO mapping
@@ -239,6 +322,7 @@ def policy_recommendations(req: PolicyReq, background_tasks: BackgroundTasks):
             - emerging_count
             - has_recommendations (bool)
     """
+    source_job_id: Optional[str] = None
     techs = req.technologies or []
     if not techs and req.job_id:
         info = get_job(req.job_id)
@@ -246,17 +330,35 @@ def policy_recommendations(req: PolicyReq, background_tasks: BackgroundTasks):
             raise HTTPException(status_code=404, detail="Job not found or not done")
         data = load_json(info.get("result_path"))
         techs = data.get("technologies", [])
+        source_job_id = req.job_id
 
     if not techs:
         raise HTTPException(status_code=400, detail="No technologies provided.")
 
+    policy_user_id = req.user_id
+    if policy_user_id is None and source_job_id:
+        source_info = get_job(source_job_id) or {}
+        policy_user_id = source_info.get("user_id")
+
     policy_job_id = str(uuid.uuid4())
     out_path = STORAGE / f"{policy_job_id}.policy.json"
-    set_status(policy_job_id, "queued", type="policy")
+    set_status(
+        policy_job_id,
+        "queued",
+        type="policy",
+        user_id=policy_user_id,
+        source_job_id=source_job_id,
+    )
 
     def run_policy_job():
         try:
-            set_status(policy_job_id, "running", type="policy")
+            set_status(
+                policy_job_id,
+                "running",
+                type="policy",
+                user_id=policy_user_id,
+                source_job_id=source_job_id,
+            )
             result = generate_policy_recommendations(
                 technologies=techs,
                 target=req.target,
@@ -265,9 +367,23 @@ def policy_recommendations(req: PolicyReq, background_tasks: BackgroundTasks):
                 llm_model=req.llm_model,
             )
             save_json(result, str(out_path))
-            set_status(policy_job_id, "done", type="policy", result_path=str(out_path))
+            set_status(
+                policy_job_id,
+                "done",
+                type="policy",
+                result_path=str(out_path),
+                user_id=policy_user_id,
+                source_job_id=source_job_id,
+            )
         except Exception as e:
-            set_status(policy_job_id, "error", type="policy", message=str(e))
+            set_status(
+                policy_job_id,
+                "error",
+                type="policy",
+                message=str(e),
+                user_id=policy_user_id,
+                source_job_id=source_job_id,
+            )
 
     background_tasks.add_task(run_policy_job)
 

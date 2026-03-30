@@ -9,7 +9,7 @@ Created on Thu Oct 23 13:33:15 2025
 
 from __future__ import annotations
 
-from typing import List, Optional, Literal, Dict
+from typing import List, Optional, Literal, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
 
 # ---------------------------------------------------------------------
@@ -56,6 +56,9 @@ class JobStatus(BaseModel):
     status: Literal["pending", "queued", "running", "done", "error"]
     message: Optional[str] = None
     result_path: Optional[str] = None
+    user_id: Optional[str] = None
+    source_job_id: Optional[str] = None
+    type: Optional[str] = None
 
 # ---------------------------------------------------------------------
 # ESCO mapping
@@ -125,6 +128,9 @@ class PolicyReq(BaseModel):
     job_id: Optional[str] = Field(
         default=None, description="Existing analysis job id to source technologies from"
     )
+    user_id: Optional[str] = Field(
+        default=None, description="Optional user identifier to associate with this policy job"
+    )
     # Keep Dict to tolerate loose upstream payloads from LLM extraction
     technologies: Optional[List[Dict]] = Field(
         default=None, description="Inline technology list (dicts tolerated)"
@@ -156,3 +162,15 @@ class PolicyRecommendationsResponse(BaseModel):
     result_path: str
     emerging_count: int
     has_recommendations: bool
+
+
+class UserResultItem(BaseModel):
+    """User-scoped stored result item for frontend listing/detail views."""
+    job_id: str
+    status: Literal["done"]
+    user_id: str
+    result_path: str
+    type: Literal["analysis", "policy"]
+    source_job_id: Optional[str] = None
+    message: Optional[str] = None
+    content: Optional[Dict[str, Any]] = None

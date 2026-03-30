@@ -1,5 +1,6 @@
 # local folders
 storage/
+.vscode/
 
 #+ # Environment variables (do not track secrets)
 #+ .env
