@@ -2,17 +2,31 @@ services:
   future-technology-trends-identifier:
     container_name: future-technology-trends-identifier
     build: .
-    image: ${DOCKER_REG}${DOCKER_REPO}future-technology-trends-identifier:${DOCKER_TAG}
+    image: ${DOCKER_REG}${DOCKER_REPO}${APP_NAME}:${DOCKER_TAG}
     env_file:
       - .env
+    environment:
+      API_URL: http://160.40.52.27:3000
+      API_TOKEN: ${API_TOKEN}
     ports:
       - "8876:8876"
     volumes:
-      - ./storage:/app/storage
-      - ./esco_data:/app/esco_data
+      - future_technology_trends_identifier_storage:/app/storage
+      - future_technology_trends_identifier_datasets:/app/esco_data
     networks:
       - shared-net
     restart: unless-stopped
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
+
+volumes:
+  future_technology_trends_identifier_storage:
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
+  future_technology_trends_identifier_datasets:
+    labels:
+      io.portainer.accesscontrol.teams: skillab-all
+
 networks:
   shared-net:
     external: true

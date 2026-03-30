@@ -15,6 +15,17 @@ pipeline {
     }
 
     stages {
+        // *************************
+        // *** PREPARATION STAGE ***
+        // *************************
+        stage('Preparation') {
+            steps {
+                echo "***** Cleaning Workspace and Checking Out Code *****"
+                cleanWs()
+                checkout scm
+            }
+        }
+
 		// *********************************
         // *** CREATE .env from Jenkins ****
         // *********************************
@@ -29,10 +40,6 @@ pipeline {
 
 							# copy defaults from example
 							cp .env.example .env
-							
-							# override or append credentials
-							sed -i "s|^API_TOKEN=.*|API_TOKEN=${API_PASS}|" .env || echo "API_TOKEN=${API_PASS}" >> .env
-							sed -i "s|^API_URL=.*|API_URL=http://160.40.52.27:3000|" .env || echo "API_URL=http://160.40.52.27:3000" >> .env
 						"""
 					}
 				}
@@ -46,7 +53,9 @@ pipeline {
             steps {
                 echo "***** Building Docker Image *****"
 				dir('policy-success-evaluator') {
-					sh "DOCKER_TAG=test docker compose -f docker-compose.yml build"
+                    withCredentials([usernamePassword(credentialsId: "${ENV_FILE_CREDENTIALS}", usernameVariable: 'API_USER', passwordVariable: 'API_PASS')]) {
+					    sh "DOCKER_TAG=test API_TOKEN=${API_PASS} docker compose -f docker-compose.yml build"
+                    }
 				}
             }
         }
@@ -58,8 +67,10 @@ pipeline {
             steps {
                 echo "***** Running Unit Tests *****"
 				dir('policy-success-evaluator') {
-					sh "DOCKER_TAG=test docker compose -f docker-compose.yml run --rm policy-success-evaluator pytest -q tests/unit"
-				}
+                    withCredentials([usernamePassword(credentialsId: "${ENV_FILE_CREDENTIALS}", usernameVariable: 'API_USER', passwordVariable: 'API_PASS')]) {
+                        sh "DOCKER_TAG=test API_TOKEN=${API_PASS} docker compose -f docker-compose.yml run --rm policy-success-evaluator pytest -q tests/unit"
+                    }
+                }
             }
         }
 
@@ -70,8 +81,10 @@ pipeline {
             steps {
                 echo "***** Running Integration Tests *****"
 				dir('policy-success-evaluator') {
-					sh "DOCKER_TAG=test docker compose -f docker-compose.yml run --rm policy-success-evaluator pytest -q tests/integration"
-				}
+                    withCredentials([usernamePassword(credentialsId: "${ENV_FILE_CREDENTIALS}", usernameVariable: 'API_USER', passwordVariable: 'API_PASS')]) {
+                        sh "DOCKER_TAG=test API_TOKEN=${API_PASS} docker compose -f docker-compose.yml run --rm policy-success-evaluator pytest -q tests/integration"
+                    }
+                }
             }
         }
 
@@ -108,12 +121,14 @@ pipeline {
                 withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${DOCKER_REG_CREDS}", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]){
                     echo "***** Deploy Application *****"
 					dir('policy-success-evaluator') {
-						sh 'docker login ${DOCKER_REG} -u ${USERNAME} -p ${PASSWORD}'
-						sh 'docker network inspect shared-net >/dev/null 2>&1 || docker network create shared-net'
-						sh 'DOCKER_TAG=${DOCKER_TAG} docker compose -f docker-compose.yml pull'
-						sh 'docker rm -f policy-success-evaluator || true'
-						sh 'DOCKER_TAG=${DOCKER_TAG} docker compose -f docker-compose.yml up -d --remove-orphans'
-						sh 'docker compose -f docker-compose.yml ps'
+                        withCredentials([usernamePassword(credentialsId: "${ENV_FILE_CREDENTIALS}", usernameVariable: 'API_USER', passwordVariable: 'API_PASS')]) {
+                            sh 'docker login ${DOCKER_REG} -u ${USERNAME} -p ${PASSWORD}'
+                            sh 'docker network inspect shared-net >/dev/null 2>&1 || docker network create shared-net'
+                            sh 'DOCKER_TAG=${DOCKER_TAG} API_TOKEN=${API_PASS} docker compose -f docker-compose.yml pull'
+                            sh 'docker rm -f policy-success-evaluator || true'
+                            sh 'DOCKER_TAG=${DOCKER_TAG} API_TOKEN=${API_PASS} docker compose -f docker-compose.yml up -d --remove-orphans'
+                            sh 'docker compose -f docker-compose.yml ps'
+                        }
 					}
                 }
             }
