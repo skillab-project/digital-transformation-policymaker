@@ -12,7 +12,7 @@ A microservice for analyzing **Future Technology Trends** from unstructured sour
 - **LLM-based Technology Extraction**  
   Each chunk is processed through a local or remote LLM (e.g., Mistral via Ollama/OpenWebUI). Output is structured JSON listing technologies, domains, occupations, and confidence scores.  
 - **Job-based Processing**  
-  Long analyses run asynchronously. Each request returns a `job_id`, which can be polled until the analysis is complete.  
+  Long analyses run asynchronously. Each request is user-linked via an optional `user_id` and returns a `job_id`, which can be polled until the analysis is complete.  
 - **JSON Storage**  
   Results are stored as a human-readable `.analysis.json` or `.policy.json` files in `/storage`.  
 - **Mapping to ESCO Occupations & Skills**  
@@ -45,9 +45,13 @@ esco_data/
  ├── all_occupations.csv  # ESCO occupations dataset
  └── all_skills.csv       # ESCO skills dataset
 storage/
+ ├── _jobs_registry.json  # Persisted job metadata
+ ├── *.pdf                # Uploaded source PDFs
  ├── *.analysis.json      # PDF analysis results
  ├── *.policy.json        # Policy recommendation results
  └── esco_cache/          # Cached ESCO embeddings (.parquet + .npy)
+tests/
+ └── test_api.py          # API tests
 ```
 
 ---
@@ -101,115 +105,249 @@ uvicorn app.main:app --reload
 
 ---
 
+## Storage Model
+
+This service uses file-based persistence, not a database.
+
+Stored on disk:
+
+- Uploaded PDFs in `storage/{job_id}.pdf`
+- Analysis results in `storage/{job_id}.analysis.json`
+- Policy results in `storage/{job_id}.policy.json`
+- Job metadata in `storage/_jobs_registry.json`
+- ESCO embedding caches in `storage/esco_cache/`
+
+Job metadata may include:
+
+- `status`
+- `result_path`
+- `message`
+- `file_hash`
+- `user_id`
+- `source_job_id`
+- `type`
+
+---
+
 ## 📡 API Endpoints
 
 ### 1. Analyze PDF
-`POST /analyze/pdf`  
-Upload a PDF (`file` form-data) and start asynchronous analysis.
 
-**Response:**
+`POST /analyze/pdf`
+
+Upload a PDF as multipart form-data and start asynchronous analysis.
+
+**Form fields:**
+
+- `file`: required PDF file
+- `user_id`: optional frontend/user identifier
+
+**Example response:**
+
 ```json
 {
   "job_id": "abc123",
-  "status": "queued"
+  "status": "queued",
+  "message": null,
+  "result_path": null,
+  "user_id": "user-123",
+  "source_job_id": null,
+  "type": null
 }
 ```
+
+**Notes:**
+
+- Duplicate PDF reuse is scoped to the same `user_id`
+- If the same user uploads the same PDF again, the previous completed analysis is reused
 
 ### 2. Get Job Status
-`GET /jobs/{job_id}`  
-Check the status of the analysis (`queued`, `running`, `done`, or `error`).  
-When finished, the result is stored as `.json`.
 
-### 3. Download Job Result
-`GET /jobs/{job_id}`  
-Check the status of the analysis (`queued`, `running`, `done`, or `error`).  
-When finished, the result is stored as `.json`.
+`GET /jobs/{job_id}`
 
-### 4. Map to ESCO
-`GET /results/{job_id}/download`  
-Returns the generated JSON file (`*.analysis.json` or `*.policy.json`).
+Check the status of the analysis (`queued`, `running`, `done`, or `error`).
 
-**Request:**
+**Example response:**
+
 ```json
 {
-  "job_id": {job_id},
-  "top_n": 5,
-  "threshold": 0.5,
-  "target": "both"  // "occupations", "skills", or "both"
+  "job_id": "abc123",
+  "status": "done",
+  "message": null,
+  "result_path": "storage/abc123.analysis.json",
+  "user_id": "user-123",
+  "source_job_id": null,
+  "type": null
 }
 ```
 
-**Response:**
+### 3. Download Stored Result
+
+`GET /results/{job_id}/download`
+
+Downloads the stored JSON result (`*.analysis.json` or `*.policy.json`) for a completed analysis or policy job.
+
+### 4. Map to ESCO
+
+`POST /map-to-esco`
+
+Maps technologies to ESCO occupations, skills, or both.
+
+**Example request:**
+
+```json
+{
+  "job_id": "abc123",
+  "top_n": 5,
+  "threshold": 0.5,
+  "target": "both"
+}
+```
+
+**Example response:**
+
 ```json
 {
   "occupations": [
-    {"technology": "AI in Education", "matches": [{"label": "University Lecturer", "score": 0.78}]}
+    {
+      "technology": "AI in Education",
+      "matches": [
+        {
+          "label": "University Lecturer",
+          "score": 0.78
+        }
+      ]
+    }
   ],
   "skills": [
-    {"technology": "AI in Education", "matches": [{"label": "Machine Learning", "score": 0.81}]}
+    {
+      "technology": "AI in Education",
+      "matches": [
+        {
+          "label": "Machine Learning",
+          "score": 0.81
+        }
+      ]
+    }
   ]
 }
 ```
 
 ### 5. Generate Policy Recommendations
-`POST /policy/recommendations`
-Queues a background job that:
-1. Detects emerging technologies
-2. Calls the LLM for each emerging one
-3. Saves structured policy recommendations to {job_id}.policy.json
 
-**Request:**
+`POST /policy/recommendations`
+
+Queues a background job that:
+
+1. Detects emerging technologies
+2. Calls the LLM for each emerging technology
+3. Saves structured policy recommendations to `storage/{policy_job_id}.policy.json`
+
+**Example request:**
+
 ```json
 {
-  "job_id": {job_id},
+  "job_id": "abc123",
+  "user_id": "user-123",
   "target": "both",
   "similarity_threshold": 0.5
 }
 ```
 
-**Response:**
+**Example response:**
+
 ```json
 {
-  "job_id": {policy_job_id},
-  "result_path": "storage/{policy_job_id}.policy.json",
+  "job_id": "policy-job-id",
+  "result_path": "storage/policy-job-id.policy.json",
   "emerging_count": 3,
   "has_recommendations": true
 }
 ```
 
-**Results must be retrieved later via:**
-`GET /results/{policy_job_id}/download`
+**Notes:**
 
-**Response (with inline content):**
+- If `job_id` is provided, the policy job inherits the source analysis job's `user_id` when `user_id` is omitted
+- Policy jobs store `source_job_id` so the frontend can link them back to the originating analysis
+
+### 6. List Analysis Results for a User
+
+`GET /users/{user_id}/analyses`
+
+Returns completed analysis results for a specific user.
+
+**Query params:**
+
+- `include_content=false` by default
+- Set `include_content=true` to include the parsed `.analysis.json` content inline
+
+**Example response:**
+
 ```json
-{
-  "emerging": [...],
-  "recommendations": [
-    {
-      "technology": "Quantum Networking",
-      "actions": [
-        {"area": "Training/Reskilling", "action": "Create pilot curricula", "priority": "High"}
-      ]
+[
+  {
+    "job_id": "abc123",
+    "status": "done",
+    "user_id": "user-123",
+    "result_path": "storage/abc123.analysis.json",
+    "type": "analysis",
+    "source_job_id": null,
+    "message": null,
+    "content": null
+  }
+]
+```
+
+### 7. List Policy Results for a User
+
+`GET /users/{user_id}/policies`
+
+Returns completed policy recommendation results for a specific user.
+
+**Query params:**
+
+- `include_content=false` by default
+- Set `include_content=true` to include the parsed `.policy.json` content inline
+
+**Example response:**
+
+```json
+[
+  {
+    "job_id": "policy-job-id",
+    "status": "done",
+    "user_id": "user-123",
+    "result_path": "storage/policy-job-id.policy.json",
+    "type": "policy",
+    "source_job_id": "abc123",
+    "message": null,
+    "content": {
+      "emerging": [],
+      "recommendations": [],
+      "mapping_evidence": {}
     }
-  ],
-  "mapping_evidence": {...}
-}
+  }
+]
 ```
 
 ---
 
 ## 🧪 Example Workflow
 
-1. **Upload a Horizon Europe PDF** → `/analyze/pdf`
-2. **Check job status** → `/jobs/{job_id}`
-3. **Map extracted technologies to ESCO** → `/map-to-esco`
-4. **Launch policy recommendations** → `/policy/recommendations`
-5. **Check policy job status** → `/jobs/{policy_job_id}`
-6. **Download policy JSON** → `/results/{policy_job_id}/download`
+1. Upload a Horizon Europe PDF to `POST /analyze/pdf` with optional `user_id`
+2. Poll `GET /jobs/{job_id}` until analysis is complete
+3. Map technologies with `POST /map-to-esco`
+4. Launch policy generation with `POST /policy/recommendations`
+5. Poll `GET /jobs/{policy_job_id}` until policy generation is complete
+6. Fetch all stored analyses from `GET /users/{user_id}/analyses`
+7. Fetch all stored policy results from `GET /users/{user_id}/policies`
+8. Download any specific JSON result with `GET /results/{job_id}/download`
+
 ---
 
 ## 🧭 API Documentation
-After starting the service, the interactive Swagger UI is available at:
+
+After starting the service, Swagger UI is available at:
 
 👉 [http://localhost:8000/docs](http://localhost:8000/docs)
 
@@ -217,6 +355,6 @@ After starting the service, the interactive Swagger UI is available at:
 
 ## 📊 Performance Notes
 
-- Embeddings for ESCO occupations & skills are precomputed and cached.  
-- Use a lightweight model (`all-MiniLM-L6-v2`) for faster inference.  
-- GPU acceleration (CUDA PyTorch) is recommended for large batches.  
+- ESCO occupation and skill embeddings are precomputed and cached
+- `all-MiniLM-L6-v2` is the default lightweight embedding model
+- GPU acceleration is recommended for larger workloads
