@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # ================ API Configuration ================
     api_token: str = Field("", env="API_TOKEN", description="Bearer token for LLM API")
     api_url: str = Field("http://localhost:3000", env="API_URL")
+    # Path appended to api_url for chat completions. Leave empty to auto-detect:
+    #   OpenAI-compatible base (ends with /v1, e.g. Ollama) -> /chat/completions
+    #   OpenWebUI-style base                                -> /api/chat/completions
+    chat_path: str = Field("", env="CHAT_PATH")
     model_name: str = Field("mistral:latest", env="MODEL_NAME")  # chat/completions model
     temperature: float = Field(0.0, ge=0.0, le=2.0, env="TEMPERATURE")
     seed: int = Field(42, ge=0, env="SEED")
@@ -74,6 +78,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_and_normalize(self):
+        # Resolve the chat-completions path once, based on the API base URL
+        chat_path = (self.chat_path or "").strip()
+        if not chat_path:
+            base = self.api_url.rstrip("/")
+            chat_path = "/chat/completions" if base.endswith("/v1") else "/api/chat/completions"
+        if not chat_path.startswith("/"):
+            chat_path = "/" + chat_path
+        object.__setattr__(self, "chat_path", chat_path)
+
         # Ensure overlap < chunk_size (reduce overlap if misconfigured)
         if self.overlap >= self.chunk_size:
             # Keep it safe, reduce overlap to 1/4 of chunk_size

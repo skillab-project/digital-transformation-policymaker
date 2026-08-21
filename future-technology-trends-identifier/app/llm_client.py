@@ -27,11 +27,13 @@ from .config import settings
 # HTTP setup
 # ---------------------------------------------------------------------
 HEADERS: Dict[str, str] = {
-    "Authorization": f"Bearer {settings.api_token}",
     "Accept": "application/json",
     "Content-Type": "application/json",
     "User-Agent": "FutureTechTrends/1.0",
 }
+# Local backends (e.g. Ollama) need no token; only send one if configured
+if settings.api_token:
+    HEADERS["Authorization"] = f"Bearer {settings.api_token}"
 # Allow project-specific extra headers without breaking defaults
 if getattr(settings, "extra_headers", None):
     try:
@@ -87,8 +89,7 @@ def analyze_chunk(text: str, query: str, context: str, timeout: int) -> Dict[str
             "required": ["technologies"],
         },
     }
-    url = f"{settings.api_url}/api/chat/completions"
-    outer = _chat_json(url=url, payload=payload, timeout=timeout + 10)
+    outer = _chat_json(url=_chat_url(), payload=_adapt_payload(payload), timeout=timeout + 10)
     return outer
 
 def generate_json(text: str, query: str, context: str, timeout: int) -> Dict[str, Any]:
@@ -148,13 +149,34 @@ def generate_json(text: str, query: str, context: str, timeout: int) -> Dict[str
             "required": ["recommendations"],
         },
     }
-    url = f"{settings.api_url}/api/chat/completions"
-    outer = _chat_json(url=url, payload=payload, timeout=timeout + 10)
+    outer = _chat_json(url=_chat_url(), payload=_adapt_payload(payload), timeout=timeout + 10)
     return outer
 
 # ---------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------
+def _chat_url() -> str:
+    """Full chat-completions URL for the configured backend."""
+    return f"{settings.api_url.rstrip('/')}{settings.chat_path}"
+
+def _adapt_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Translate the JSON-schema hint to whatever the configured backend understands.
+
+    - OpenAI-compatible endpoints (e.g. Ollama's /v1) reject/ignore the top-level
+      `format` key; they use `response_format` instead.
+    - OpenWebUI/Ollama-native endpoints keep `format` as-is.
+    """
+    openai_style = not settings.chat_path.startswith("/api/")
+    if not openai_style:
+        return payload
+
+    adapted = dict(payload)
+    schema = adapted.pop("format", None)
+    if schema is not None:
+        adapted["response_format"] = {"type": "json_object"}
+    return adapted
+
 def _chat_json(url: str, payload: Dict[str, Any], timeout: int, retries: int = 2) -> Dict[str, Any]:
     """
     POST a chat completion request and parse a JSON object from the first choice's message.

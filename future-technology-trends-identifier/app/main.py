@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 from typing import Any, Optional, Union
@@ -31,7 +33,17 @@ from fastapi.responses import FileResponse
 from .analyzer import load_json, process_pdf, save_json
 from .esco_match import map_technologies_to_esco_occupations, map_technologies_to_esco_skills, map_technologies_to_esco_both, warm_esco_caches
 from .jobs import new_job, set_status, get_job, list_jobs, rehydrate_from_storage, _load_jobs
-from .models import ESCOMapRequest, ESCOMapItem, ESCOMapBoth, JobStatus, PolicyReq, PolicyRecommendationsResponse, UserResultItem
+from .models import (
+    ESCOMapRequest,
+    ESCOMapItem,
+    ESCOMapBoth,
+    JobStatus,
+    PolicyReq,
+    PolicyRecommendationsResponse,
+    UserResultItem,
+    AnalysisTitleItem,
+    AnalysisRecordItem,
+)
 from .policy_recs import generate_policy_recommendations
 
 # -----------------------------------------------------------------------------
@@ -118,11 +130,25 @@ def _startup() -> None:
         - `_load_jobs()` may restore in-memory tracking structures.
         - `rehydrate_from_storage()` associates any previously saved results.
         - `warm_esco_caches()` primes ESCO lookup layers for faster mapping.
+
+    ESCO warm-up (model load + embedding of all ESCO rows) is heavy and, on a
+    cold cache, can take minutes. It is run in a background thread so the app
+    starts serving requests (e.g. /health) immediately; the first ESCO mapping
+    will simply wait until warm-up finishes. The ESCO cache functions are
+    idempotent, so a concurrent first request racing the warm-up is safe.
     """
     _load_jobs()
     rehydrate_from_storage(str(STORAGE))
-    warm_esco_caches()
-    log.info("Startup complete: storage=%s", STORAGE.resolve())
+
+    def _warm() -> None:
+        try:
+            warm_esco_caches()
+            log.info("ESCO caches warmed.")
+        except Exception as exc:  # noqa: BLE001 - don't let warm-up kill the app
+            log.exception("ESCO cache warm-up failed: %s", exc)
+
+    threading.Thread(target=_warm, name="warm-esco-caches", daemon=True).start()
+    log.info("Startup complete (ESCO caches warming in background): storage=%s", STORAGE.resolve())
 
 # -----------------------------------------------------------------------------
 # Health
@@ -141,36 +167,54 @@ async def analyze_pdf(
     file: UploadFile = File(...),
     query: Optional[str] = None,
     user_id: Optional[str] = Form(default=None),
+    title: Optional[str] = Form(default=None),
+    sector: Optional[str] = Form(default=None),
+    description: Optional[str] = Form(default=None),
 ) -> JobStatus:
     """
     Enqueue PDF analysis.
 
     Behavior:
         - Validates .pdf extension and non-empty content
-        - Deduplicates by content hash: if a finished job with the same hash exists,
-          returns its job status immediately
+        - Deduplicates by content hash: if a finished job with the same hash and
+          title exists, returns its job status immediately
         - Otherwise, stores the PDF and spawns a background task that:
             * processes the PDF
-            * writes result JSON
+            * writes result JSON (with the title/sector/description embedded)
             * updates job status accordingly
+
+    Metadata:
+        - `title`: groups one or more PDF analyses (a title may cover several PDFs)
+        - `sector`: high-level sector for the title (one per title)
+        - `description`: free-text description for the title (one per title)
+        These are persisted in the job registry and embedded in the analysis JSON,
+        and are surfaced by the analysis-catalog endpoints below.
     """
-    filename = (file.filename or "").lower()
-    if not filename.endswith(".pdf"):
+    orig_filename = file.filename or ""
+    if not orig_filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty file.")
 
+    # Normalize optional metadata (treat blank strings as absent)
+    title = (title or "").strip() or None
+    sector = (sector or "").strip() or None
+    description = (description or "").strip() or None
+    orig_filename = orig_filename or None
+    created_at = datetime.now(timezone.utc).isoformat()
+
     file_hash = _sha256(data)
 
-    # Deduplicate by hash if a completed job exists
+    # Deduplicate by hash if a completed job exists (same user and same title)
     for jid, info in (list_jobs() or {}).items():
         if (
             info.get("status") == "done"
             and info.get("file_hash") == file_hash
             and info.get("result_path")
             and info.get("user_id") == user_id
+            and info.get("title") == title
         ):
             return JobStatus(
                 job_id=jid,
@@ -179,6 +223,10 @@ async def analyze_pdf(
                 result_path=info["result_path"],
                 user_id=info.get("user_id"),
                 source_job_id=info.get("source_job_id"),
+                title=info.get("title"),
+                sector=info.get("sector"),
+                description=info.get("description"),
+                filename=info.get("filename"),
             )
 
     # New job
@@ -195,8 +243,20 @@ async def analyze_pdf(
                 message="Processing PDF",
                 file_hash=file_hash,
                 user_id=user_id,
+                title=title,
+                sector=sector,
+                description=description,
+                filename=orig_filename,
+                created_at=created_at,
             )
             result: dict[str, Any] = process_pdf(str(tmp_path), query=query)
+
+            # Save the metadata alongside the analysis content
+            result["title"] = title
+            result["sector"] = sector
+            result["description"] = description
+            result["filename"] = orig_filename
+            result["created_at"] = created_at
 
             out_path = STORAGE / f"{job_id}.analysis.json"
             save_json(result, str(out_path))
@@ -207,6 +267,11 @@ async def analyze_pdf(
                 result_path=str(out_path),
                 file_hash=file_hash,
                 user_id=user_id,
+                title=title,
+                sector=sector,
+                description=description,
+                filename=orig_filename,
+                created_at=created_at,
             )
         except Exception as exc:  # noqa: BLE001 - bubble through as status
             log.exception("PDF analysis failed for job %s: %s", job_id, exc)
@@ -216,11 +281,41 @@ async def analyze_pdf(
                 message=str(exc),
                 file_hash=file_hash,
                 user_id=user_id,
+                title=title,
+                sector=sector,
+                description=description,
+                filename=orig_filename,
+                created_at=created_at,
             )
+        finally:
+            # The raw PDF is only needed for the analysis above; the analysis
+            # JSON (and downstream ESCO mapping / recommendations) never re-read
+            # it. Delete it to keep the storage volume clean.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                log.warning("Could not delete temporary PDF for job %s", job_id)
 
     background_tasks.add_task(_run)
-    set_status(job_id, "queued", user_id=user_id)
-    return JobStatus(job_id=job_id, status="queued", user_id=user_id)
+    set_status(
+        job_id,
+        "queued",
+        user_id=user_id,
+        title=title,
+        sector=sector,
+        description=description,
+        filename=orig_filename,
+        created_at=created_at,
+    )
+    return JobStatus(
+        job_id=job_id,
+        status="queued",
+        user_id=user_id,
+        title=title,
+        sector=sector,
+        description=description,
+        filename=orig_filename,
+    )
 
 @app.get("/jobs/{job_id}", response_model=JobStatus, tags=["analysis"])
 def job_status(job_id: str) -> JobStatus:
@@ -253,10 +348,131 @@ def download_result(job_id: str) -> FileResponse:
     )
 
 
-@app.get("/users/{user_id}/analyses", response_model=list[UserResultItem], tags=["analysis"])
-def list_user_analyses(user_id: str, include_content: bool = Query(default=False)) -> list[UserResultItem]:
-    """List completed analysis results stored for a specific user."""
-    return _list_user_results(user_id, "analysis", include_content)
+# -----------------------------------------------------------------------------
+# Analysis catalog (grouped by title / sector)
+# -----------------------------------------------------------------------------
+def _iter_analysis_jobs():
+    """Yield (job_id, info) for every completed *analysis* job."""
+    for job_id, info in list_jobs().items():
+        if info.get("status") != "done":
+            continue
+        result_path = info.get("result_path")
+        if not result_path or not str(result_path).endswith(".analysis.json"):
+            continue
+        yield job_id, info
+
+
+def _sort_titles_newest_first(grouped: dict[str, dict[str, Any]]) -> list[str]:
+    """Return title keys sorted by created_at descending, then title ascending."""
+    keys = sorted(grouped.keys(), key=str.lower)  # stable secondary: title asc
+    keys.sort(key=lambda k: grouped[k].get("created_at") or "", reverse=True)  # primary: date desc
+    return keys
+
+
+def _build_analysis_record(job_id: str, info: dict[str, Any], include_content: bool) -> AnalysisRecordItem:
+    """Shape a completed analysis job into a catalog record item."""
+    result_path = info.get("result_path")
+    if not result_path:
+        raise HTTPException(status_code=500, detail=f"Missing result path for job {job_id}")
+
+    path = Path(result_path)
+    if not path.exists():
+        raise HTTPException(status_code=500, detail=f"Result file not found for job {job_id}")
+
+    content = load_json(str(path)) if include_content else None
+    return AnalysisRecordItem(
+        job_id=job_id,
+        status="done",
+        user_id=(str(info["user_id"]) if info.get("user_id") is not None else None),
+        title=info.get("title"),
+        sector=info.get("sector"),
+        description=info.get("description"),
+        filename=info.get("filename"),
+        created_at=info.get("created_at"),
+        result_path=str(path),
+        type="analysis",
+        source_job_id=info.get("source_job_id"),
+        message=info.get("message"),
+        content=content,
+    )
+
+
+@app.get("/analyses/titles", response_model=list[AnalysisTitleItem], tags=["analysis"])
+def list_analysis_titles() -> list[AnalysisTitleItem]:
+    """
+    List every distinct analysis title, with its sector and description.
+
+    A title may cover several PDF analyses; sector and description are
+    consistent per title. `count` reports how many analyses share the title.
+    """
+    grouped: dict[str, dict[str, Any]] = {}
+    for job_id, info in _iter_analysis_jobs():
+        title = info.get("title")
+        if not title:
+            continue
+        entry = grouped.setdefault(
+            title,
+            {"title": title, "sector": None, "description": None, "count": 0, "created_at": None},
+        )
+        entry["count"] += 1
+        # Sector/description are one-per-title; keep the latest non-empty value.
+        if info.get("sector"):
+            entry["sector"] = info.get("sector")
+        if info.get("description"):
+            entry["description"] = info.get("description")
+        # Represent the title by the most recent analysis date.
+        created = info.get("created_at")
+        if created and (entry["created_at"] is None or created > entry["created_at"]):
+            entry["created_at"] = created
+
+    return [AnalysisTitleItem(**grouped[t]) for t in _sort_titles_newest_first(grouped)]
+
+
+@app.get("/analyses/by-title/{title}", response_model=list[AnalysisRecordItem], tags=["analysis"])
+def list_analyses_by_title(title: str, include_content: bool = Query(default=False)) -> list[AnalysisRecordItem]:
+    """List the individual PDF analyses that exist under a specific title."""
+    items = [
+        _build_analysis_record(job_id, info, include_content)
+        for job_id, info in _iter_analysis_jobs()
+        if info.get("title") == title
+    ]
+    items.sort(key=lambda item: item.job_id, reverse=True)
+    return items
+
+
+@app.get("/analyses/sectors", response_model=list[str], tags=["analysis"])
+def list_analysis_sectors() -> list[str]:
+    """List every distinct sector across all analyses."""
+    sectors = {
+        info.get("sector")
+        for _job_id, info in _iter_analysis_jobs()
+        if info.get("sector")
+    }
+    return sorted(sectors, key=str.lower)
+
+
+@app.get("/analyses/by-sector/{sector}", response_model=list[AnalysisTitleItem], tags=["analysis"])
+def list_titles_by_sector(sector: str) -> list[AnalysisTitleItem]:
+    """List the distinct titles (with description) that exist for a sector."""
+    grouped: dict[str, dict[str, Any]] = {}
+    for _job_id, info in _iter_analysis_jobs():
+        if info.get("sector") != sector:
+            continue
+        title = info.get("title")
+        if not title:
+            continue
+        entry = grouped.setdefault(
+            title,
+            {"title": title, "sector": sector, "description": None, "count": 0, "created_at": None},
+        )
+        entry["count"] += 1
+        if info.get("description"):
+            entry["description"] = info.get("description")
+        created = info.get("created_at")
+        if created and (entry["created_at"] is None or created > entry["created_at"]):
+            entry["created_at"] = created
+
+    return [AnalysisTitleItem(**grouped[t]) for t in _sort_titles_newest_first(grouped)]
 
 
 @app.get("/users/{user_id}/policies", response_model=list[UserResultItem], tags=["policy"])

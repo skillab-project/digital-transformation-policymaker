@@ -59,6 +59,12 @@ class JobStatus(BaseModel):
     user_id: Optional[str] = None
     source_job_id: Optional[str] = None
     type: Optional[str] = None
+    # Analysis metadata (grouping fields). One title groups one or more PDF
+    # analyses; sector and description are consistent for a given title.
+    title: Optional[str] = None
+    sector: Optional[str] = None
+    description: Optional[str] = None
+    filename: Optional[str] = None
 
 # ---------------------------------------------------------------------
 # ESCO mapping
@@ -171,6 +177,42 @@ class UserResultItem(BaseModel):
     user_id: str
     result_path: str
     type: Literal["analysis", "policy"]
+    source_job_id: Optional[str] = None
+    message: Optional[str] = None
+    content: Optional[Dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------
+# Analysis catalog (grouped by title / sector)
+# ---------------------------------------------------------------------
+class AnalysisTitleItem(BaseModel):
+    """
+    One distinct analysis title with its (single) sector and description.
+
+    A title can group several PDF analyses, but sector and description are
+    consistent across all analyses sharing the same title.
+    """
+    title: str
+    sector: Optional[str] = None
+    description: Optional[str] = None
+    count: int = Field(0, description="Number of PDF analyses under this title")
+    created_at: Optional[str] = Field(
+        default=None, description="ISO-8601 timestamp of the analysis (most recent PDF under this title)"
+    )
+
+
+class AnalysisRecordItem(BaseModel):
+    """A single completed PDF analysis, optionally with its stored content."""
+    job_id: str
+    status: Literal["done"]
+    user_id: Optional[str] = None
+    title: Optional[str] = None
+    sector: Optional[str] = None
+    description: Optional[str] = None
+    filename: Optional[str] = None
+    created_at: Optional[str] = None
+    result_path: str
+    type: Literal["analysis", "policy"] = "analysis"
     source_job_id: Optional[str] = None
     message: Optional[str] = None
     content: Optional[Dict[str, Any]] = None

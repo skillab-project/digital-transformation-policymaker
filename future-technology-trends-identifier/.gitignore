@@ -4,6 +4,7 @@ storage/
 
 #+ # Environment variables (do not track secrets)
 #+ .env
+docker-compose.dev.yml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
