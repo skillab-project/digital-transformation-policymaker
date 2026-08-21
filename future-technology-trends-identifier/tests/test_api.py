@@ -176,43 +176,98 @@ def test_duplicate_pdf_reuse_is_scoped_to_same_user(client, monkeypatch):
     assert other_user_body["user_id"] == "user-b"
 
 
-def test_list_user_analyses_returns_only_matching_user_results(client, monkeypatch):
+def _seed_catalog(monkeypatch):
+    """Seed three completed analyses across two titles/sectors."""
     jobs_mod.set_status(
-        "analysis-user-1",
-        "done",
-        user_id="user-1",
-        result_path="storage/analysis-user-1.analysis.json",
+        "a1", "done", user_id="user-1", title="AI Report", sector="ICT",
+        description="desc A", filename="a1.pdf",
+        created_at="2026-01-01T00:00:00+00:00",
+        result_path="storage/a1.analysis.json",
     )
     jobs_mod.set_status(
-        "analysis-user-2",
-        "done",
-        user_id="user-2",
-        result_path="storage/analysis-user-2.analysis.json",
+        "a2", "done", user_id="user-1", title="AI Report", sector="ICT",
+        description="desc A", filename="a2.pdf",
+        created_at="2026-01-02T00:00:00+00:00",
+        result_path="storage/a2.analysis.json",
     )
     jobs_mod.set_status(
-        "policy-user-1",
-        "done",
-        user_id="user-1",
-        type="policy",
-        result_path="storage/policy-user-1.policy.json",
-        source_job_id="analysis-user-1",
+        "a3", "done", user_id="user-2", title="Energy Grid", sector="Energy",
+        description="desc E", filename="a3.pdf",
+        created_at="2026-01-03T00:00:00+00:00",
+        result_path="storage/a3.analysis.json",
     )
+    monkeypatch.setattr(main_mod.Path, "exists", lambda self: True)
 
-    monkeypatch.setattr(
-        main_mod.Path,
-        "exists",
-        lambda self: str(self).endswith(".analysis.json") or str(self).endswith(".policy.json"),
-    )
 
-    r = client.get("/users/user-1/analyses")
+def test_analyses_titles_lists_distinct_titles_newest_first(client, monkeypatch):
+    _seed_catalog(monkeypatch)
+
+    r = client.get("/analyses/titles")
     assert r.status_code == 200, r.text
     data = r.json()
 
-    assert len(data) == 1
-    assert data[0]["job_id"] == "analysis-user-1"
-    assert data[0]["user_id"] == "user-1"
-    assert data[0]["type"] == "analysis"
+    by_title = {t["title"]: t for t in data}
+    assert set(by_title) == {"AI Report", "Energy Grid"}
+    assert by_title["AI Report"]["count"] == 2
+    assert by_title["AI Report"]["sector"] == "ICT"
+    assert by_title["AI Report"]["description"] == "desc A"
+    assert by_title["AI Report"]["created_at"] == "2026-01-02T00:00:00+00:00"
+    # Newest-first ordering (Energy Grid is the most recent analysis)
+    assert data[0]["title"] == "Energy Grid"
+
+
+def test_analyses_by_title_returns_matching_records(client, monkeypatch):
+    _seed_catalog(monkeypatch)
+
+    r = client.get("/analyses/by-title/AI Report")
+    assert r.status_code == 200, r.text
+    data = r.json()
+
+    assert len(data) == 2
+    assert {d["job_id"] for d in data} == {"a1", "a2"}
+    assert all(d["title"] == "AI Report" for d in data)
+    assert {d["filename"] for d in data} == {"a1.pdf", "a2.pdf"}
     assert data[0]["content"] is None
+
+
+def test_analyses_by_title_can_include_content(client, monkeypatch):
+    _seed_catalog(monkeypatch)
+    monkeypatch.setattr(
+        main_mod,
+        "load_json",
+        lambda path: {"technologies": [{"name": "Edge AI"}], "title": "AI Report"},
+    )
+
+    r = client.get("/analyses/by-title/AI Report?include_content=true")
+    assert r.status_code == 200, r.text
+    data = r.json()
+
+    assert data[0]["content"]["technologies"][0]["name"] == "Edge AI"
+
+
+def test_analyses_sectors_lists_distinct_sectors(client, monkeypatch):
+    _seed_catalog(monkeypatch)
+
+    r = client.get("/analyses/sectors")
+    assert r.status_code == 200, r.text
+    assert r.json() == ["Energy", "ICT"]
+
+
+def test_analyses_by_sector_lists_titles(client, monkeypatch):
+    _seed_catalog(monkeypatch)
+
+    r = client.get("/analyses/by-sector/ICT")
+    assert r.status_code == 200, r.text
+    data = r.json()
+
+    assert [t["title"] for t in data] == ["AI Report"]
+    assert data[0]["sector"] == "ICT"
+    assert data[0]["count"] == 2
+
+
+def test_old_users_analyses_endpoint_is_removed(client):
+    r = client.get("/users/user-1/analyses")
+    assert r.status_code == 404
 
 
 def test_list_user_policies_can_include_content(client, monkeypatch):
