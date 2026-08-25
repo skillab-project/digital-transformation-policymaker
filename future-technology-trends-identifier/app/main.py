@@ -258,6 +258,7 @@ async def analyze_pdf(
             result["description"] = description
             result["filename"] = orig_filename
             result["created_at"] = created_at
+            result["user_id"] = user_id
 
             out_path = STORAGE / f"{job_id}.analysis.json"
             save_json(result, str(out_path))
@@ -637,6 +638,12 @@ def policy_recommendations(req: PolicyReq, background_tasks: BackgroundTasks):
                 max_actions_per_tech=req.max_actions_per_tech,
                 llm_model=req.llm_model,
             )
+            # Embed the job linkage so the policy result can be re-associated
+            # after a restart even if the registry file is lost.
+            result["type"] = "policy"
+            result["user_id"] = policy_user_id
+            result["source_job_id"] = source_job_id
+            result["created_at"] = datetime.now(timezone.utc).isoformat()
             save_json(result, str(out_path))
             set_status(
                 policy_job_id,

@@ -270,6 +270,111 @@ def test_old_users_analyses_endpoint_is_removed(client):
     assert r.status_code == 404
 
 
+def test_delete_analyses_by_title_removes_analyses_and_policies(client):
+    jobs_mod.set_status("a1", "done", user_id="user-1", title="AI Report", sector="ICT",
+                        result_path="storage/a1.analysis.json")
+    jobs_mod.set_status("a2", "done", user_id="user-1", title="AI Report", sector="ICT",
+                        result_path="storage/a2.analysis.json")
+    jobs_mod.set_status("a3", "done", user_id="user-2", title="Energy Grid", sector="Energy",
+                        result_path="storage/a3.analysis.json")
+    jobs_mod.set_status("p1", "done", user_id="user-1", type="policy",
+                        result_path="storage/p1.policy.json", source_job_id="a1")
+
+    r = client.delete("/analyses/by-title/AI Report")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["deleted_analyses"] == 2
+    assert data["deleted_policies"] == 1
+
+    # Removed from the registry (and its policy), other title untouched.
+    assert jobs_mod.get_job("a1") is None
+    assert jobs_mod.get_job("a2") is None
+    assert jobs_mod.get_job("p1") is None
+    assert jobs_mod.get_job("a3") is not None
+
+    titles = {t["title"] for t in client.get("/analyses/titles").json()}
+    assert titles == {"Energy Grid"}
+
+
+def test_delete_analyses_by_title_404_when_missing(client):
+    r = client.delete("/analyses/by-title/Nonexistent")
+    assert r.status_code == 404
+
+
+def test_rehydrate_recovers_metadata_from_files(client, tmp_path):
+    """
+    With an empty registry, rehydrate_from_storage must recover title/sector/
+    description from the embedded metadata in the .analysis.json files so the
+    catalog endpoints still work after a registry loss.
+    """
+    import json as _json
+
+    jobs_mod._jobs.clear()
+    jid = "11111111-2222-3333-4444-555555555555"
+    payload = {
+        "technologies": [{"name": "Edge AI"}],
+        "title": "Recovered Report",
+        "sector": "ICT",
+        "description": "from file",
+        "created_at": "2026-02-02T00:00:00+00:00",
+        "filename": "doc.pdf",
+        "user_id": "user-1",
+    }
+    (tmp_path / f"{jid}.analysis.json").write_text(_json.dumps(payload), encoding="utf-8")
+
+    # Real rehydrate (the client fixture stubs the app's startup call, but we
+    # invoke the function directly here against a temp storage dir).
+    jobs_mod.rehydrate_from_storage(str(tmp_path))
+
+    info = jobs_mod.get_job(jid)
+    assert info is not None
+    assert info["title"] == "Recovered Report"
+    assert info["sector"] == "ICT"
+    assert info["description"] == "from file"
+    assert info["created_at"] == "2026-02-02T00:00:00+00:00"
+
+    # And the catalog endpoint now lists the recovered analysis.
+    titles = {t["title"] for t in client.get("/analyses/titles").json()}
+    assert "Recovered Report" in titles
+
+
+def test_rehydrate_recovers_policy_linkage_from_files(client, tmp_path):
+    """
+    Policy results must survive a registry loss too: rehydrate recovers the
+    type/source_job_id/user_id embedded in the .policy.json so the per-user
+    policy listing (used by the UI to restore recommendations) still works.
+    """
+    import json as _json
+
+    jobs_mod._jobs.clear()
+    pid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    payload = {
+        "emerging": [],
+        "recommendations": [{"technology": "Edge AI", "actions": []}],
+        "mapping_evidence": {"occupations": [], "skills": []},
+        "type": "policy",
+        "user_id": "user-1",
+        "source_job_id": "analysis-1",
+        "created_at": "2026-02-03T00:00:00+00:00",
+    }
+    (tmp_path / f"{pid}.policy.json").write_text(_json.dumps(payload), encoding="utf-8")
+
+    jobs_mod.rehydrate_from_storage(str(tmp_path))
+
+    info = jobs_mod.get_job(pid)
+    assert info is not None
+    assert info["type"] == "policy"
+    assert info["source_job_id"] == "analysis-1"
+    assert info["user_id"] == "user-1"
+
+    # The per-user policy listing includes it, with content loaded from disk.
+    data = client.get("/users/user-1/policies?include_content=true").json()
+    assert len(data) == 1
+    assert data[0]["job_id"] == pid
+    assert data[0]["source_job_id"] == "analysis-1"
+    assert data[0]["content"]["recommendations"][0]["technology"] == "Edge AI"
+
+
 def test_list_user_policies_can_include_content(client, monkeypatch):
     jobs_mod.set_status(
         "policy-1",

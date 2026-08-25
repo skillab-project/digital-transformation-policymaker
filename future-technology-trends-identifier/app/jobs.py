@@ -33,9 +33,11 @@ from uuid import uuid4
 DEFAULT_STORAGE = Path("storage")
 JOBS_DB = DEFAULT_STORAGE / "_jobs_registry.json"
 ANALYSIS_GLOB = "*.analysis.json"
+POLICY_GLOB = "*.policy.json"
 
 # Looser "UUID-ish" pattern is fine; keep your behavior
 JOB_ID_RE = re.compile(r"([0-9a-fA-F-]{32,})\.analysis\.json$")
+POLICY_ID_RE = re.compile(r"([0-9a-fA-F-]{32,})\.policy\.json$")
 
 # Allowed status values for basic validation
 _ALLOWED_STATUSES = {"pending", "queued", "running", "done", "error"}
@@ -85,9 +87,55 @@ def _load_jobs() -> None:
         # Ignore malformed file; next save will fix it
         pass
 
+# Metadata fields that are embedded in the result JSON and can be recovered
+# from disk if the registry file is lost.
+_ANALYSIS_META_KEYS = ("title", "sector", "description", "created_at", "filename", "user_id")
+_POLICY_META_KEYS = ("source_job_id", "user_id", "created_at")
+
+
+def _read_file_meta(path: Path, keys) -> Dict[str, Any]:
+    """Best-effort read of selected non-null keys from a result JSON file."""
+    out: Dict[str, Any] = {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for key in keys:
+                val = data.get(key)
+                if val is not None:
+                    out[key] = val
+    except Exception:
+        # Ignore unreadable/partial files.
+        pass
+    return out
+
+
+def _register_from_file(jid: str, path: Path, base: Dict[str, Any], file_meta: Dict[str, Any]) -> None:
+    """Create/update a registry entry, filling only missing metadata fields."""
+    with _lock:
+        meta = _jobs.setdefault(jid, {})
+        meta["status"] = "done"
+        meta["result_path"] = str(path)
+        for key, val in base.items():
+            meta[key] = val
+        for key, val in file_meta.items():
+            if meta.get(key) in (None, ""):
+                meta[key] = val
+
+
 def rehydrate_from_storage(storage_dir: str = "storage") -> None:
     """
-    Scan storage for existing *.analysis.json and mark them as done.
+    Scan storage for existing result files and mark their jobs as done.
+
+    The result files are the source of truth: metadata embedded in them is
+    recovered into the registry when it is missing. This keeps the catalog and
+    policy-listing endpoints working even if `_jobs_registry.json` was lost or
+    reset while the result files persisted (e.g. after a redeploy).
+
+    - `*.analysis.json` -> analysis jobs (title, sector, description,
+      created_at, filename, user_id)
+    - `*.policy.json`   -> policy jobs (source_job_id, user_id, created_at),
+      tagged with type="policy"
 
     Idempotent: safe to call multiple times (e.g., on restart).
     """
@@ -99,11 +147,14 @@ def rehydrate_from_storage(storage_dir: str = "storage") -> None:
         m = JOB_ID_RE.search(p.name)
         if not m:
             continue
-        jid = m.group(1)
-        with _lock:
-            # Preserve any existing metadata; update status & result_path
-            meta = _jobs.setdefault(jid, {})
-            meta.update({"status": "done", "result_path": str(p)})
+        _register_from_file(m.group(1), p, {}, _read_file_meta(p, _ANALYSIS_META_KEYS))
+
+    for p in root.glob(POLICY_GLOB):
+        m = POLICY_ID_RE.search(p.name)
+        if not m:
+            continue
+        _register_from_file(m.group(1), p, {"type": "policy"}, _read_file_meta(p, _POLICY_META_KEYS))
+
     _save_jobs()
 
 def new_job() -> str:
@@ -149,14 +200,16 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     if info:
         return dict(info)  # return a shallow copy to avoid external mutation
 
-    # Lazy fallback: derive from disk if present
+    # Lazy fallback: derive from disk if present, recovering embedded metadata.
     p = DEFAULT_STORAGE / f"{job_id}.analysis.json"
     if p.exists():
-        info = {"status": "done", "result_path": str(p)}
-        with _lock:
-            _jobs[job_id] = info
-            _save_jobs()
-        return dict(info)
+        _register_from_file(job_id, p, {}, _read_file_meta(p, _ANALYSIS_META_KEYS))
+        return dict(_jobs.get(job_id, {}))
+
+    pp = DEFAULT_STORAGE / f"{job_id}.policy.json"
+    if pp.exists():
+        _register_from_file(job_id, pp, {"type": "policy"}, _read_file_meta(pp, _POLICY_META_KEYS))
+        return dict(_jobs.get(job_id, {}))
 
     return None
 
