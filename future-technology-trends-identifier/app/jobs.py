@@ -164,3 +164,15 @@ def list_jobs() -> Dict[str, Dict[str, Any]]:
     """Return a shallow copy of the entire registry (thread-safe snapshot)."""
     with _lock:
         return dict(_jobs)
+
+def delete_job(job_id: str) -> bool:
+    """
+    Remove a job from the registry and persist the change.
+
+    Returns True if a job was removed, False if the id was not present.
+    """
+    with _lock:
+        existed = _jobs.pop(job_id, None) is not None
+        if existed:
+            _save_jobs()
+    return existed

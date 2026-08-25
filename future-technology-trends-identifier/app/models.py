@@ -201,6 +201,13 @@ class AnalysisTitleItem(BaseModel):
     )
 
 
+class AnalysisDeleteResult(BaseModel):
+    """Summary returned when an analysis (grouped by title) is deleted."""
+    title: str
+    deleted_analyses: int = Field(0, description="Number of PDF analyses removed")
+    deleted_policies: int = Field(0, description="Number of related policy results removed")
+
+
 class AnalysisRecordItem(BaseModel):
     """A single completed PDF analysis, optionally with its stored content."""
     job_id: str

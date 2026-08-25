@@ -32,7 +32,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, 
 from fastapi.responses import FileResponse
 from .analyzer import load_json, process_pdf, save_json
 from .esco_match import map_technologies_to_esco_occupations, map_technologies_to_esco_skills, map_technologies_to_esco_both, warm_esco_caches
-from .jobs import new_job, set_status, get_job, list_jobs, rehydrate_from_storage, _load_jobs
+from .jobs import new_job, set_status, get_job, list_jobs, delete_job, rehydrate_from_storage, _load_jobs
 from .models import (
     ESCOMapRequest,
     ESCOMapItem,
@@ -43,6 +43,7 @@ from .models import (
     UserResultItem,
     AnalysisTitleItem,
     AnalysisRecordItem,
+    AnalysisDeleteResult,
 )
 from .policy_recs import generate_policy_recommendations
 
@@ -438,6 +439,60 @@ def list_analyses_by_title(title: str, include_content: bool = Query(default=Fal
     ]
     items.sort(key=lambda item: item.job_id, reverse=True)
     return items
+
+
+@app.delete("/analyses/by-title/{title}", response_model=AnalysisDeleteResult, tags=["analysis"])
+def delete_analyses_by_title(title: str) -> AnalysisDeleteResult:
+    """
+    Delete an entire analysis (all PDF analyses that share the given title),
+    together with any policy/recommendation results generated from them.
+
+    Removes both the stored result files and the job-registry entries.
+    Returns 404 if no analysis with that title exists.
+    """
+    # Collect the analysis jobs under this title.
+    analysis_ids = [
+        job_id for job_id, info in _iter_analysis_jobs()
+        if info.get("title") == title
+    ]
+    if not analysis_ids:
+        raise HTTPException(status_code=404, detail="No analysis found for this title.")
+
+    analysis_id_set = set(analysis_ids)
+
+    # Collect policy jobs generated from those analyses.
+    policy_ids = [
+        job_id for job_id, info in list_jobs().items()
+        if info.get("source_job_id") in analysis_id_set
+        and str(info.get("result_path", "")).endswith(".policy.json")
+    ]
+
+    def _remove(job_id: str) -> None:
+        """Delete a job's result file, its leftover PDF, and its registry entry."""
+        info = get_job(job_id) or {}
+        result_path = info.get("result_path")
+        if result_path:
+            try:
+                Path(result_path).unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                log.warning("Could not delete result file for job %s", job_id)
+        # Remove any leftover source PDF (normally already deleted post-analysis).
+        try:
+            (STORAGE / f"{job_id}.pdf").unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        delete_job(job_id)
+
+    for job_id in analysis_ids:
+        _remove(job_id)
+    for job_id in policy_ids:
+        _remove(job_id)
+
+    return AnalysisDeleteResult(
+        title=title,
+        deleted_analyses=len(analysis_ids),
+        deleted_policies=len(policy_ids),
+    )
 
 
 @app.get("/analyses/sectors", response_model=list[str], tags=["analysis"])
