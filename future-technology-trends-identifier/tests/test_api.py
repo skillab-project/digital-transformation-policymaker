@@ -301,6 +301,51 @@ def test_delete_analyses_by_title_404_when_missing(client):
     assert r.status_code == 404
 
 
+def test_policies_by_title_returns_only_that_titles_policies(client, monkeypatch):
+    # Two analyses under "AI Report" (different users), one under "Energy Grid".
+    jobs_mod.set_status("a1", "done", user_id="user-1", title="AI Report", sector="ICT",
+                        result_path="storage/a1.analysis.json")
+    jobs_mod.set_status("a2", "done", user_id="user-2", title="AI Report", sector="ICT",
+                        result_path="storage/a2.analysis.json")
+    jobs_mod.set_status("a3", "done", user_id="user-1", title="Energy Grid", sector="Energy",
+                        result_path="storage/a3.analysis.json")
+    # Policies: p1 from a1 (user-1), p2 from a2 (user-2), p3 from a3 (other title).
+    jobs_mod.set_status("p1", "done", user_id="user-1", type="policy",
+                        result_path="storage/p1.policy.json", source_job_id="a1")
+    jobs_mod.set_status("p2", "done", user_id="user-2", type="policy",
+                        result_path="storage/p2.policy.json", source_job_id="a2")
+    jobs_mod.set_status("p3", "done", user_id="user-1", type="policy",
+                        result_path="storage/p3.policy.json", source_job_id="a3")
+
+    monkeypatch.setattr(main_mod.Path, "exists", lambda self: True)
+
+    data = client.get("/policies/by-title/AI Report").json()
+    # Both policies for the title, across users; not the Energy Grid one.
+    assert {d["job_id"] for d in data} == {"p1", "p2"}
+    assert all(d["type"] == "policy" for d in data)
+    assert all(d["content"] is None for d in data)
+
+
+def test_policies_by_title_include_content(client, monkeypatch):
+    jobs_mod.set_status("a1", "done", user_id="user-1", title="AI Report", sector="ICT",
+                        result_path="storage/a1.analysis.json")
+    jobs_mod.set_status("p1", "done", user_id="user-1", type="policy",
+                        result_path="storage/p1.policy.json", source_job_id="a1")
+
+    monkeypatch.setattr(main_mod.Path, "exists", lambda self: True)
+    monkeypatch.setattr(
+        main_mod, "load_json",
+        lambda path: {"recommendations": [{"technology": "Edge AI", "actions": []}],
+                      "mapping_evidence": {"occupations": [], "skills": []}},
+    )
+
+    data = client.get("/policies/by-title/AI Report?include_content=true").json()
+    assert len(data) == 1
+    assert data[0]["job_id"] == "p1"
+    assert data[0]["source_job_id"] == "a1"
+    assert data[0]["content"]["recommendations"][0]["technology"] == "Edge AI"
+
+
 def test_rehydrate_recovers_metadata_from_files(client, tmp_path):
     """
     With an empty registry, rehydrate_from_storage must recover title/sector/

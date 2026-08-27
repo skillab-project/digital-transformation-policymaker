@@ -90,7 +90,7 @@ def _build_user_result_item(job_id: str, info: dict[str, Any], result_type: str,
     return UserResultItem(
         job_id=job_id,
         status="done",
-        user_id=str(info.get("user_id", "")),
+        user_id=str(info.get("user_id") or ""),
         result_path=str(path),
         type=result_type,  # type: ignore[arg-type]
         source_job_id=info.get("source_job_id"),
@@ -535,6 +535,35 @@ def list_titles_by_sector(sector: str) -> list[AnalysisTitleItem]:
 def list_user_policies(user_id: str, include_content: bool = Query(default=False)) -> list[UserResultItem]:
     """List completed policy recommendation results stored for a specific user."""
     return _list_user_results(user_id, "policy", include_content)
+
+
+@app.get("/policies/by-title/{title}", response_model=list[UserResultItem], tags=["policy"])
+def list_policies_by_title(title: str, include_content: bool = Query(default=False)) -> list[UserResultItem]:
+    """
+    List the policy/recommendation results generated from the analyses that
+    share the given title (regardless of which user generated them).
+
+    A policy job's `source_job_id` points at the analysis job it came from, so
+    this returns every completed policy whose source is one of the analyses
+    under `title`. Pass `include_content=true` to inline the stored result.
+    """
+    analysis_ids = {
+        job_id for job_id, info in _iter_analysis_jobs()
+        if info.get("title") == title
+    }
+    items: list[UserResultItem] = []
+    for job_id, info in list_jobs().items():
+        if info.get("status") != "done":
+            continue
+        if info.get("source_job_id") not in analysis_ids:
+            continue
+        result_path = info.get("result_path")
+        if not result_path or not str(result_path).endswith(".policy.json"):
+            continue
+        items.append(_build_user_result_item(job_id, info, "policy", include_content))
+
+    items.sort(key=lambda item: item.job_id, reverse=True)
+    return items
 
 # -----------------------------------------------------------------------------
 # ESCO mapping
