@@ -44,6 +44,8 @@ from .models import (
     AnalysisTitleItem,
     AnalysisRecordItem,
     AnalysisDeleteResult,
+    TitleExistsResult,
+    AnalysisBatchStatus,
 )
 from .policy_recs import generate_policy_recommendations
 
@@ -319,6 +321,136 @@ async def analyze_pdf(
         filename=orig_filename,
     )
 
+# -----------------------------------------------------------------------------
+# One-click full pipeline: analysis -> ESCO mapping -> policy recommendations
+# -----------------------------------------------------------------------------
+def _run_full_pipeline(
+    job_id: str,
+    tmp_path: Path,
+    filename: Optional[str],
+    user_id: Optional[str],
+    title: Optional[str],
+    sector: Optional[str],
+    description: Optional[str],
+    created_at: str,
+    query: Optional[str],
+) -> None:
+    """Analyze one PDF, then generate policy recommendations (with defaults)."""
+    common = dict(
+        type="analysis", user_id=user_id, title=title, sector=sector,
+        description=description, filename=filename, created_at=created_at,
+    )
+    try:
+        set_status(job_id, "running", stage="analyzing", message="Analyzing PDF", **common)
+        result: dict[str, Any] = process_pdf(str(tmp_path), query=query)
+        result["title"] = title
+        result["sector"] = sector
+        result["description"] = description
+        result["filename"] = filename
+        result["created_at"] = created_at
+        result["user_id"] = user_id
+
+        out_path = STORAGE / f"{job_id}.analysis.json"
+        save_json(result, str(out_path))
+        set_status(job_id, "running", stage="recommending",
+                   message="Mapping to ESCO and generating recommendations",
+                   result_path=str(out_path), **common)
+
+        # Policy recommendations (which also produce the ESCO mapping_evidence).
+        techs = result.get("technologies", []) or []
+        policy_job_id = str(uuid.uuid4())
+        policy_out = STORAGE / f"{policy_job_id}.policy.json"
+        set_status(policy_job_id, "running", type="policy",
+                   user_id=user_id, source_job_id=job_id)
+        try:
+            policy = generate_policy_recommendations(
+                technologies=techs, target="both",
+                similarity_threshold=0.5, max_actions_per_tech=4,
+            )
+            policy["type"] = "policy"
+            policy["user_id"] = user_id
+            policy["source_job_id"] = job_id
+            policy["created_at"] = datetime.now(timezone.utc).isoformat()
+            save_json(policy, str(policy_out))
+            set_status(policy_job_id, "done", type="policy",
+                       result_path=str(policy_out), user_id=user_id, source_job_id=job_id)
+        except Exception as pexc:  # noqa: BLE001 - recommendations are best-effort
+            log.exception("Recommendations failed for job %s: %s", job_id, pexc)
+            set_status(policy_job_id, "error", type="policy",
+                       message=str(pexc), user_id=user_id, source_job_id=job_id)
+
+        set_status(job_id, "done", stage="done", result_path=str(out_path), **common)
+    except Exception as exc:  # noqa: BLE001 - surface as job status
+        log.exception("Full pipeline failed for job %s: %s", job_id, exc)
+        set_status(job_id, "error", stage="error", message=str(exc), **common)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            log.warning("Could not delete temporary PDF for job %s", job_id)
+
+
+@app.post("/analyze/pdf/full", response_model=AnalysisBatchStatus, tags=["analysis"])
+async def analyze_pdf_full(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    user_id: Optional[str] = Form(default=None),
+    title: Optional[str] = Form(default=None),
+    sector: Optional[str] = Form(default=None),
+    description: Optional[str] = Form(default=None),
+    query: Optional[str] = Form(default=None),
+) -> AnalysisBatchStatus:
+    """
+    One-click analysis for one or more PDFs.
+
+    Enqueues a background job that, for each PDF and using default parameters,
+    runs the whole pipeline — PDF analysis, ESCO mapping and policy
+    recommendations — and stores the results. PDFs are processed one at a time.
+    Returns immediately with the analysis job ids; poll `/jobs/{job_id}` for the
+    per-PDF `stage`, or `/analyses/titles?include_running=true` for aggregate
+    progress.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="Please upload at least one PDF file.")
+
+    title = (title or "").strip() or None
+    sector = (sector or "").strip() or None
+    description = (description or "").strip() or None
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    prepared: list[tuple[str, Path, Optional[str]]] = []
+    for f in files:
+        fname = f.filename or ""
+        if not fname.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail=f"'{fname}' is not a PDF file.")
+        data = await f.read()
+        if not data:
+            raise HTTPException(status_code=400, detail=f"'{fname}' is empty.")
+        job_id = new_job()
+        tmp_path = STORAGE / f"{job_id}.pdf"
+        tmp_path.write_bytes(data)
+        set_status(
+            job_id, "queued", stage="queued", type="analysis",
+            user_id=user_id, title=title, sector=sector, description=description,
+            filename=(fname or None), created_at=created_at, file_hash=_sha256(data),
+        )
+        prepared.append((job_id, tmp_path, fname or None))
+
+    def _run_all() -> None:
+        for job_id, tmp_path, fname in prepared:
+            _run_full_pipeline(
+                job_id, tmp_path, fname, user_id, title, sector, description, created_at, query
+            )
+
+    background_tasks.add_task(_run_all)
+    return AnalysisBatchStatus(
+        title=title,
+        job_ids=[p[0] for p in prepared],
+        count=len(prepared),
+        status="queued",
+    )
+
+
 @app.get("/jobs/{job_id}", response_model=JobStatus, tags=["analysis"])
 def job_status(job_id: str) -> JobStatus:
     """Return the status of a job by its ID."""
@@ -353,13 +485,27 @@ def download_result(job_id: str) -> FileResponse:
 # -----------------------------------------------------------------------------
 # Analysis catalog (grouped by title / sector)
 # -----------------------------------------------------------------------------
-def _iter_analysis_jobs():
-    """Yield (job_id, info) for every completed *analysis* job."""
+def _is_analysis_job(info: dict[str, Any]) -> bool:
+    """True for analysis (not policy) jobs, including ones still running."""
+    if info.get("type") == "policy":
+        return False
+    if info.get("type") == "analysis":
+        return True
+    # Backward-compat: identify by the result file suffix when type is absent.
+    return str(info.get("result_path", "")).endswith(".analysis.json")
+
+
+def _iter_analysis_jobs(include_running: bool = False):
+    """
+    Yield (job_id, info) for analysis jobs.
+
+    By default only completed ones; with include_running=True also queued/
+    running/error jobs (used to surface in-progress analyses in the catalog).
+    """
     for job_id, info in list_jobs().items():
-        if info.get("status") != "done":
+        if not _is_analysis_job(info):
             continue
-        result_path = info.get("result_path")
-        if not result_path or not str(result_path).endswith(".analysis.json"):
+        if not include_running and info.get("status") != "done":
             continue
         yield job_id, info
 
@@ -372,26 +518,30 @@ def _sort_titles_newest_first(grouped: dict[str, dict[str, Any]]) -> list[str]:
 
 
 def _build_analysis_record(job_id: str, info: dict[str, Any], include_content: bool) -> AnalysisRecordItem:
-    """Shape a completed analysis job into a catalog record item."""
-    result_path = info.get("result_path")
-    if not result_path:
-        raise HTTPException(status_code=500, detail=f"Missing result path for job {job_id}")
+    """
+    Shape an analysis job into a catalog record item.
 
-    path = Path(result_path)
-    if not path.exists():
-        raise HTTPException(status_code=500, detail=f"Result file not found for job {job_id}")
+    Tolerates jobs that are still running (no result file yet): the content is
+    only loaded when the result file exists and include_content is requested.
+    """
+    result_path = info.get("result_path") or ""
+    content = None
+    if result_path and include_content:
+        path = Path(result_path)
+        if path.exists():
+            content = load_json(str(path))
 
-    content = load_json(str(path)) if include_content else None
     return AnalysisRecordItem(
         job_id=job_id,
-        status="done",
+        status=info.get("status", "done"),
+        stage=info.get("stage"),
         user_id=(str(info["user_id"]) if info.get("user_id") is not None else None),
         title=info.get("title"),
         sector=info.get("sector"),
         description=info.get("description"),
         filename=info.get("filename"),
         created_at=info.get("created_at"),
-        result_path=str(path),
+        result_path=str(result_path),
         type="analysis",
         source_job_id=info.get("source_job_id"),
         message=info.get("message"),
@@ -399,24 +549,43 @@ def _build_analysis_record(job_id: str, info: dict[str, Any], include_content: b
     )
 
 
+def _aggregate_title_status(entry: dict[str, Any]) -> None:
+    """Compute the aggregate status of a title group from its jobs' statuses."""
+    statuses = entry.pop("_statuses", [])
+    done = sum(1 for s in statuses if s == "done")
+    entry["done_count"] = done
+    entry["total"] = len(statuses)
+    if any(s in ("pending", "queued", "running") for s in statuses):
+        entry["status"] = "running"
+    elif any(s == "error" for s in statuses):
+        entry["status"] = "done" if done == len(statuses) else "partial"
+    else:
+        entry["status"] = "done"
+
+
 @app.get("/analyses/titles", response_model=list[AnalysisTitleItem], tags=["analysis"])
-def list_analysis_titles() -> list[AnalysisTitleItem]:
+def list_analysis_titles(include_running: bool = Query(default=False)) -> list[AnalysisTitleItem]:
     """
     List every distinct analysis title, with its sector and description.
 
     A title may cover several PDF analyses; sector and description are
     consistent per title. `count` reports how many analyses share the title.
+    Pass `include_running=true` to also include analyses still being processed;
+    each item then carries an aggregate `status` (running | done | partial) and
+    `done_count`/`total` for a progress indicator.
     """
     grouped: dict[str, dict[str, Any]] = {}
-    for job_id, info in _iter_analysis_jobs():
+    for job_id, info in _iter_analysis_jobs(include_running):
         title = info.get("title")
         if not title:
             continue
         entry = grouped.setdefault(
             title,
-            {"title": title, "sector": None, "description": None, "count": 0, "created_at": None},
+            {"title": title, "sector": None, "description": None, "count": 0,
+             "created_at": None, "_statuses": []},
         )
         entry["count"] += 1
+        entry["_statuses"].append(info.get("status"))
         # Sector/description are one-per-title; keep the latest non-empty value.
         if info.get("sector"):
             entry["sector"] = info.get("sector")
@@ -427,15 +596,50 @@ def list_analysis_titles() -> list[AnalysisTitleItem]:
         if created and (entry["created_at"] is None or created > entry["created_at"]):
             entry["created_at"] = created
 
+    for entry in grouped.values():
+        _aggregate_title_status(entry)
+
     return [AnalysisTitleItem(**grouped[t]) for t in _sort_titles_newest_first(grouped)]
 
 
+@app.get("/analyses/title-exists", response_model=TitleExistsResult, tags=["analysis"])
+def analysis_title_exists(title: str = Query(..., description="Analysis title to check")) -> TitleExistsResult:
+    """
+    Check whether an analysis with the given title already exists.
+
+    Comparison is case-insensitive and ignores surrounding whitespace. Use this
+    before starting a new analysis so the user can be told to pick a unique
+    title (a single analysis may still contain several PDFs under one title).
+    """
+    norm = (title or "").strip().lower()
+    exists = bool(norm) and any(
+        (info.get("title") or "").strip().lower() == norm
+        for _job_id, info in _iter_analysis_jobs()
+    )
+    return TitleExistsResult(
+        title=title,
+        exists=exists,
+        message=("An analysis with this title already exists. Please choose a different title."
+                 if exists else None),
+    )
+
+
 @app.get("/analyses/by-title/{title}", response_model=list[AnalysisRecordItem], tags=["analysis"])
-def list_analyses_by_title(title: str, include_content: bool = Query(default=False)) -> list[AnalysisRecordItem]:
-    """List the individual PDF analyses that exist under a specific title."""
+def list_analyses_by_title(
+    title: str,
+    include_content: bool = Query(default=False),
+    include_running: bool = Query(default=False),
+) -> list[AnalysisRecordItem]:
+    """
+    List the individual PDF analyses under a specific title.
+
+    Pass `include_running=true` to also include PDFs still being processed
+    (each record then carries its live `status`/`stage`), so the UI can resume
+    polling an analysis that is still in progress.
+    """
     items = [
         _build_analysis_record(job_id, info, include_content)
-        for job_id, info in _iter_analysis_jobs()
+        for job_id, info in _iter_analysis_jobs(include_running)
         if info.get("title") == title
     ]
     items.sort(key=lambda item: item.job_id, reverse=True)

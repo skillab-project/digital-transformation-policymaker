@@ -59,6 +59,9 @@ class JobStatus(BaseModel):
     user_id: Optional[str] = None
     source_job_id: Optional[str] = None
     type: Optional[str] = None
+    # Pipeline stage for the full auto-analysis: queued | analyzing |
+    # recommending | done | error (used to drive a progress indicator).
+    stage: Optional[str] = None
     # Analysis metadata (grouping fields). One title groups one or more PDF
     # analyses; sector and description are consistent for a given title.
     title: Optional[str] = None
@@ -199,6 +202,12 @@ class AnalysisTitleItem(BaseModel):
     created_at: Optional[str] = Field(
         default=None, description="ISO-8601 timestamp of the analysis (most recent PDF under this title)"
     )
+    # Aggregate progress (populated when running analyses are included).
+    status: Optional[str] = Field(
+        default=None, description="running | done | error | partial (aggregate over the title's PDFs)"
+    )
+    done_count: int = Field(0, description="Number of PDFs finished")
+    total: int = Field(0, description="Total number of PDFs under this title")
 
 
 class AnalysisDeleteResult(BaseModel):
@@ -208,18 +217,34 @@ class AnalysisDeleteResult(BaseModel):
     deleted_policies: int = Field(0, description="Number of related policy results removed")
 
 
+class TitleExistsResult(BaseModel):
+    """Whether an analysis with a given title already exists."""
+    title: str
+    exists: bool
+    message: Optional[str] = None
+
+
 class AnalysisRecordItem(BaseModel):
-    """A single completed PDF analysis, optionally with its stored content."""
+    """A single PDF analysis (possibly still running), optionally with content."""
     job_id: str
-    status: Literal["done"]
+    status: str = "done"  # pending | queued | running | done | error
+    stage: Optional[str] = None
     user_id: Optional[str] = None
     title: Optional[str] = None
     sector: Optional[str] = None
     description: Optional[str] = None
     filename: Optional[str] = None
     created_at: Optional[str] = None
-    result_path: str
+    result_path: str = ""
     type: Literal["analysis", "policy"] = "analysis"
     source_job_id: Optional[str] = None
     message: Optional[str] = None
     content: Optional[Dict[str, Any]] = None
+
+
+class AnalysisBatchStatus(BaseModel):
+    """Returned when a one-click full analysis (multiple PDFs) is enqueued."""
+    title: Optional[str] = None
+    job_ids: List[str]
+    count: int
+    status: str = "queued"

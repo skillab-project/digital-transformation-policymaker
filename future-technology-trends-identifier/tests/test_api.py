@@ -245,6 +245,95 @@ def test_analyses_by_title_can_include_content(client, monkeypatch):
     assert data[0]["content"]["technologies"][0]["name"] == "Edge AI"
 
 
+def test_analysis_title_exists(client, monkeypatch):
+    _seed_catalog(monkeypatch)  # seeds titles "AI Report" and "Energy Grid"
+
+    r = client.get("/analyses/title-exists", params={"title": "AI Report"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["exists"] is True
+    assert body["message"]
+
+    # Case-insensitive + whitespace-insensitive.
+    assert client.get("/analyses/title-exists", params={"title": "  ai report "}).json()["exists"] is True
+
+    # A free title.
+    free = client.get("/analyses/title-exists", params={"title": "Brand New"}).json()
+    assert free["exists"] is False
+    assert free["message"] is None
+
+
+def test_analyze_pdf_full_runs_pipeline(client, monkeypatch):
+    import json as _json
+
+    monkeypatch.setattr(main_mod, "process_pdf",
+                        lambda *a, **k: {"technologies": [{"name": "Edge AI"}]})
+    monkeypatch.setattr(
+        main_mod, "generate_policy_recommendations",
+        lambda **k: {"emerging": [],
+                     "recommendations": [{"technology": "Edge AI", "actions": []}],
+                     "mapping_evidence": {"occupations": [], "skills": []}},
+    )
+
+    files = [
+        ("files", ("a.pdf", b"%PDF-1.4 a", "application/pdf")),
+        ("files", ("b.pdf", b"%PDF-1.4 b", "application/pdf")),
+    ]
+    r = client.post("/analyze/pdf/full", files=files,
+                    data={"user_id": "u1", "title": "Batch", "sector": "ICT", "description": "d"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 2 and len(body["job_ids"]) == 2
+
+    # Background task ran to completion under the TestClient.
+    for jid in body["job_ids"]:
+        info = jobs_mod.get_job(jid)
+        assert info["status"] == "done" and info["stage"] == "done"
+        assert info["type"] == "analysis"
+        saved = _json.load(open(info["result_path"], encoding="utf-8"))
+        assert saved["title"] == "Batch" and saved["technologies"][0]["name"] == "Edge AI"
+
+    # Aggregate progress via titles?include_running.
+    titles = {t["title"]: t for t in client.get("/analyses/titles?include_running=true").json()}
+    assert titles["Batch"]["total"] == 2
+    assert titles["Batch"]["done_count"] == 2
+    assert titles["Batch"]["status"] == "done"
+
+    # Each PDF has a stored policy (recommendations + mapping_evidence).
+    pol = client.get("/policies/by-title/Batch?include_content=true").json()
+    assert len(pol) == 2
+    assert all(p["content"]["recommendations"][0]["technology"] == "Edge AI" for p in pol)
+    assert all("mapping_evidence" in p["content"] for p in pol)
+
+    # Cleanup files written to ./storage by the pipeline.
+    import shutil, os
+    shutil.rmtree("storage", ignore_errors=True)
+    os.makedirs("storage", exist_ok=True)
+
+
+def test_titles_include_running_reports_progress(client):
+    jobs_mod.set_status("a1", "done", type="analysis", title="Batch", sector="ICT",
+                        result_path="storage/a1.analysis.json")
+    jobs_mod.set_status("a2", "running", type="analysis", stage="analyzing",
+                        title="Batch", sector="ICT")
+
+    # Default listing: only the completed PDF is counted.
+    default = {t["title"]: t for t in client.get("/analyses/titles").json()}
+    assert default["Batch"]["count"] == 1
+
+    running = {t["title"]: t for t in client.get("/analyses/titles?include_running=true").json()}
+    assert running["Batch"]["total"] == 2
+    assert running["Batch"]["done_count"] == 1
+    assert running["Batch"]["status"] == "running"
+
+    # by-title?include_running exposes both jobs with their live status.
+    recs = client.get("/analyses/by-title/Batch?include_running=true").json()
+    assert {r["job_id"] for r in recs} == {"a1", "a2"}
+    statuses = {r["job_id"]: r["status"] for r in recs}
+    assert statuses["a2"] == "running"
+    assert next(r for r in recs if r["job_id"] == "a2")["stage"] == "analyzing"
+
+
 def test_analyses_sectors_lists_distinct_sectors(client, monkeypatch):
     _seed_catalog(monkeypatch)
 
